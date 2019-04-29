@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -30,6 +31,7 @@ var watchList []string
 var base string
 var clientAddress string
 var programCmd string
+var pipeline int
 
 func main() {
 	watchList = make([]string, 0)
@@ -63,9 +65,9 @@ func main() {
 			Destination: &programCmd,
 		},
 		cli.IntFlag{
-			Name:  "pipeline",
-			Value: 100,
-			Usage: "send the events together if they occur within the time span. Only valid for program runner.",
+			Name:        "pipeline",
+			Usage:       "send the events together if they occur within the time span. Only valid for program runner.",
+			Destination: &pipeline,
 		},
 		cli.BoolFlag{
 			Name:  "recursive",
@@ -74,6 +76,9 @@ func main() {
 	}
 	app.Action = func(c *cli.Context) error {
 		var err error
+		prod := producer{
+			eventChannel: make(chan Event),
+		}
 		base, err = filepath.Abs(base)
 		if err != nil {
 			log.Fatal(err)
@@ -83,12 +88,15 @@ func main() {
 				clientAddress = "localhost" + clientAddress
 			}
 		}
+		if pipeline != 0 {
+			go execLoop(prod.eventChannel)
+		}
 		for _, arg := range c.Args() {
 			addToWatchlist(base, arg, c.Bool("recursive"))
 		}
 		readStdin(base)
 		if len(watchList) > 0 {
-			watch(watchList)
+			prod.watch(watchList)
 		}
 		// this has to come last
 		if c.String("listen") != "" {
@@ -96,7 +104,7 @@ func main() {
 			if addr[0] == ':' {
 				addr = "localhost" + addr
 			}
-			startServer(addr)
+			prod.startServer(addr)
 		}
 
 		return nil
@@ -159,7 +167,11 @@ func addToWatchlist(base string, pattern string, recursive bool) {
 	}
 }
 
-func startServer(address string) {
+type producer struct {
+	eventChannel chan Event
+}
+
+func (p *producer) startServer(address string) {
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		decoder := json.NewDecoder(r.Body)
 		var e Event
@@ -167,13 +179,13 @@ func startServer(address string) {
 		if err != nil {
 			panic(err)
 		}
-		fileChanged(e)
+		p.fileChanged(e)
 	})
 	log.Print("Listening on http://" + address)
 	http.ListenAndServe(address, nil)
 }
 
-func watch(paths []string) {
+func (p *producer) watch(paths []string) {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		log.Fatal(err)
@@ -189,14 +201,14 @@ func watch(paths []string) {
 					return
 				}
 				if event.Op&fsnotify.Write == fsnotify.Write {
-					p, err := filepath.Rel(base, event.Name)
+					rp, err := filepath.Rel(base, event.Name)
 					if err != nil {
 						log.Panic(err)
 					}
-					fileChanged(Event{
+					p.fileChanged(Event{
 						Operation: opToString(event.Op),
-						Path:      p,
-						Time:      time.Now().Unix(),
+						Path:      rp,
+						Time:      time.Now().UnixNano() / 1000000,
 					})
 				}
 			case err, ok := <-watcher.Errors:
@@ -221,13 +233,13 @@ func watch(paths []string) {
 // ----- Runners -----
 //
 
-func fileChanged(e Event) {
+func (p *producer) fileChanged(e Event) {
 	go printRunner(e)
 	if clientAddress != "" {
 		go httpRunner(e)
 	}
 	if programCmd != "" {
-		go programRunner(e)
+		go programRunner(p.eventChannel, e)
 	}
 }
 
@@ -257,12 +269,52 @@ func httpRunner(e Event) {
 // ----- Batch program -----
 //
 
-func programRunner(e Event) {
-	go runParallel(e)
+type eventList struct {
+	events    []Event
+	isRunning bool
+	mux       sync.Mutex
 }
 
-func runParallel(e Event) {
-	cmd := exec.Command(programCmd, base, e.Path, e.Operation)
+var process *os.Process
+var initProgamRunner sync.Once
+var pendingEvents eventList
+
+func programRunner(eventChannel chan Event, e Event) {
+	initProgamRunner.Do(func() {
+		pendingEvents = eventList{
+			events:    make([]Event, 0),
+			isRunning: false,
+		}
+	})
+	if pipeline == 0 {
+		go execProgram(e)
+		return
+	}
+
+	pendingEvents.mux.Lock()
+	pendingEvents.events = append(pendingEvents.events, e)
+	pendingEvents.mux.Unlock()
+	// kill
+	if process != nil {
+		process.Kill()
+	}
+	// run later
+	dur, err := time.ParseDuration(fmt.Sprint(pipeline, "ms"))
+	if err != nil {
+		log.Panic(err)
+	}
+	time.AfterFunc(dur, func() {
+		eventChannel <- e
+	})
+}
+
+func execProgram(events ...Event) bool {
+	println("execProgram")
+	args := []string{base}
+	for _, e := range events {
+		args = append(append(args, e.Path), e.Operation)
+	}
+	cmd := exec.Command(programCmd, args...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		log.Println(err)
@@ -270,6 +322,7 @@ func runParallel(e Event) {
 	if err := cmd.Start(); err != nil {
 		log.Println(err)
 	}
+	process = cmd.Process
 	output, err := ioutil.ReadAll(stdout)
 	if err != nil {
 		log.Println(err)
@@ -277,5 +330,29 @@ func runParallel(e Event) {
 	log.Print("Output from command:\n" + string(output))
 	if err := cmd.Wait(); err != nil {
 		log.Println(err)
+		return false
+	}
+	return true
+}
+
+func execLoop(eventChannel chan Event) {
+	for {
+		<-eventChannel
+		events := pendingEvents.events
+		if len(events) == 0 {
+			continue
+		}
+		e := events[len(events)-1]
+		past := time.Now().UnixNano()/1000000 - e.Time
+		if past >= int64(pipeline) {
+			if execProgram(events...) {
+				// reset list if successful
+				pendingEvents.mux.Lock()
+				pendingEvents.events = make([]Event, 0)
+				pendingEvents.mux.Unlock()
+			} else {
+				println("exec failed")
+			}
+		}
 	}
 }
