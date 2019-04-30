@@ -1,6 +1,6 @@
 package main
 
-// TODO disable kill, discard, docs, disable prog output, exclude files
+// TODO disable kill, discard, docs, shorter flags
 
 import (
 	"bufio"
@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sync"
 	"time"
 
@@ -38,6 +39,7 @@ type program struct {
 	programCmd       string
 	batchMS          int
 	base             string
+	silent           bool
 }
 
 type eventList struct {
@@ -62,8 +64,12 @@ func main() {
 			Destination: &prog.base,
 		},
 		cli.BoolFlag{
-			Name:  "recursive",
-			Usage: "search directories recursively",
+			Name:  "shallow",
+			Usage: "disable recursive file globbing",
+		},
+		cli.StringFlag{
+			Name:  "exclude",
+			Usage: "exclude files from the search using Regular Expression. This does not apply to files form stdin",
 		},
 		cli.StringFlag{
 			Name:  "listen",
@@ -83,6 +89,11 @@ func main() {
 			Name:        "batch",
 			Usage:       "send the events together if they occur within the time span. Only valid for program runner.",
 			Destination: &prog.batchMS,
+		},
+		cli.BoolFlag{
+			Name:        "silent",
+			Usage:       "don't print program output",
+			Destination: &prog.silent,
 		},
 		cli.BoolFlag{
 			Name:        "verbose",
@@ -108,7 +119,12 @@ func main() {
 		// find files from stdin and args
 		watchList := pathsFromStdin()
 		for _, arg := range c.Args() {
-			watchList = append(watchList, findPaths(prog.base, arg, c.Bool("recursive"))...)
+			watchList = append(watchList, findPaths(prog.base, arg, !c.Bool("shallow"), c.String("exclude"))...)
+		}
+		if verbose {
+			for _, p := range watchList {
+				logVerbose("Wathing: " + p)
+			}
 		}
 
 		// fail if nothing to watch
@@ -139,22 +155,6 @@ func main() {
 	}
 }
 
-func opToString(op fsnotify.Op) string {
-	switch op {
-	case fsnotify.Create:
-		return "create"
-	case fsnotify.Write:
-		return "write"
-	case fsnotify.Remove:
-		return "remove"
-	case fsnotify.Rename:
-		return "rename"
-	case fsnotify.Chmod:
-		return "chmod"
-	}
-	panic(errors.New("No such op"))
-}
-
 func pathsFromStdin() []string {
 	paths := make([]string, 0)
 	fi, err := os.Stdin.Stat()
@@ -173,13 +173,20 @@ func pathsFromStdin() []string {
 	return paths
 }
 
-func findPaths(base string, pattern string, recursive bool) []string {
+func findPaths(base string, pattern string, recursive bool, exclude string) []string {
 	paths, err := filepath.Glob(path.Join(base, pattern))
 	if err != nil {
 		panic(err)
 	}
-	allPaths := paths
+	allPaths := make([]string, 0)
 	for _, p := range paths {
+		exlucded, err := regexp.MatchString(exclude, p)
+		if err != nil {
+			panic(err)
+		}
+		if exlucded {
+			continue
+		}
 		allPaths = append(allPaths, p)
 		// if recursive and is dir, go deeper
 		if recursive {
@@ -188,7 +195,7 @@ func findPaths(base string, pattern string, recursive bool) []string {
 				panic(err)
 			}
 			if fileInfo.IsDir() {
-				allPaths = append(allPaths, findPaths(p, "*", true)...)
+				allPaths = append(allPaths, findPaths(p, "*", true, exclude)...)
 			}
 		}
 	}
@@ -353,14 +360,16 @@ func (p *program) execProgram(events ...Event) bool {
 		return false
 	}
 	p.process = cmd.Process
-	output, err := ioutil.ReadAll(stdout)
-	if err != nil {
-		logError(err)
-		return false
-	}
-	_, err = os.Stdout.Write(output)
-	if err != nil {
-		logError(err)
+	// print program output to stderr
+	if !p.silent {
+		output, err := ioutil.ReadAll(stdout)
+		if err != nil {
+			logError(err)
+			return false
+		}
+		if _, err = os.Stderr.Write(output); err != nil {
+			logError(err)
+		}
 	}
 	if err := cmd.Wait(); err != nil {
 		log.Println(err)
@@ -407,4 +416,20 @@ func logVerbose(msg interface{}) {
 
 func logError(msg interface{}) {
 	log.Println(msg)
+}
+
+func opToString(op fsnotify.Op) string {
+	switch op {
+	case fsnotify.Create:
+		return "create"
+	case fsnotify.Write:
+		return "write"
+	case fsnotify.Remove:
+		return "remove"
+	case fsnotify.Rename:
+		return "rename"
+	case fsnotify.Chmod:
+		return "chmod"
+	}
+	panic(errors.New("No such op"))
 }
