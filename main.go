@@ -1,6 +1,6 @@
 package main
 
-// TODO args checking, better logging, kill, discard, docs, verbose, enable prog output
+// TODO disable kill, discard, docs, disable prog output, exclude files
 
 import (
 	"bufio"
@@ -36,7 +36,7 @@ type program struct {
 	initProgamRunner sync.Once
 	clientAddress    string
 	programCmd       string
-	pipeline         int
+	batchMS          int
 	base             string
 }
 
@@ -61,6 +61,10 @@ func main() {
 			Usage:       "base path for the client",
 			Destination: &prog.base,
 		},
+		cli.BoolFlag{
+			Name:  "recursive",
+			Usage: "search directories recursively",
+		},
 		cli.StringFlag{
 			Name:  "listen",
 			Usage: "listen to the address for file changes",
@@ -76,13 +80,9 @@ func main() {
 			Destination: &prog.programCmd,
 		},
 		cli.IntFlag{
-			Name:        "pipeline",
+			Name:        "batch",
 			Usage:       "send the events together if they occur within the time span. Only valid for program runner.",
-			Destination: &prog.pipeline,
-		},
-		cli.BoolFlag{
-			Name:  "recursive",
-			Usage: "search directories recursively",
+			Destination: &prog.batchMS,
 		},
 		cli.BoolFlag{
 			Name:        "verbose",
@@ -94,7 +94,7 @@ func main() {
 		var err error
 		prog.base, err = filepath.Abs(prog.base)
 		if err != nil {
-			log.Fatal(err)
+			panic(err)
 		}
 		if prog.clientAddress != "" {
 			if prog.clientAddress[0] == ':' {
@@ -102,7 +102,7 @@ func main() {
 			}
 		}
 		// enable pipelining
-		if prog.programCmd != "" && prog.pipeline != 0 {
+		if prog.programCmd != "" && prog.batchMS > 0 {
 			go prog.execLoop()
 		}
 		// find files from stdin and args
@@ -135,7 +135,7 @@ func main() {
 		return nil
 	}
 	if err := app.Run(os.Args); err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
 }
 
@@ -167,7 +167,7 @@ func pathsFromStdin() []string {
 			paths = append(paths, scanner.Text())
 		}
 		if err := scanner.Err(); err != nil {
-			logVerbose(err)
+			panic(err)
 		}
 	}
 	return paths
@@ -206,7 +206,7 @@ func (p *program) startServer(address string, done chan bool) {
 		var e Event
 		err := decoder.Decode(&e)
 		if err != nil {
-			panic(err)
+			logError(err)
 		}
 		p.fileChanged(e)
 	})
@@ -218,7 +218,7 @@ func (p *program) startServer(address string, done chan bool) {
 func (p *program) startWatching(base string, paths []string, done chan bool) {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
 	// defer watcher.Close()
 
@@ -232,19 +232,20 @@ func (p *program) startWatching(base string, paths []string, done chan bool) {
 				if event.Op&fsnotify.Write == fsnotify.Write {
 					rp, err := filepath.Rel(base, event.Name)
 					if err != nil {
-						log.Panic(err)
+						logError(err)
+					} else {
+						p.fileChanged(Event{
+							Operation: opToString(event.Op),
+							Path:      rp,
+							Time:      time.Now().UnixNano() / 1000000,
+						})
 					}
-					p.fileChanged(Event{
-						Operation: opToString(event.Op),
-						Path:      rp,
-						Time:      time.Now().UnixNano() / 1000000,
-					})
 				}
 			case err, ok := <-watcher.Errors:
 				if !ok {
 					return
 				}
-				logVerbose(err)
+				logError(err)
 			}
 		}
 	}()
@@ -252,7 +253,7 @@ func (p *program) startWatching(base string, paths []string, done chan bool) {
 	for _, p := range paths {
 		err = watcher.Add(p)
 		if err != nil {
-			log.Fatal(err)
+			panic(err)
 		}
 	}
 }
@@ -282,7 +283,8 @@ func (p *program) printRunner(e Event) {
 func (p *program) httpRunner(e Event) {
 	b, err := json.Marshal(&e)
 	if err != nil {
-		panic(err)
+		logError(err)
+		return
 	}
 	url := "http://" + p.clientAddress
 	req, err := http.NewRequest("POST", url, bytes.NewBuffer(b))
@@ -290,7 +292,7 @@ func (p *program) httpRunner(e Event) {
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		logVerbose(err)
+		logError(err)
 	}
 	if resp.Body != nil {
 		resp.Body.Close()
@@ -309,11 +311,13 @@ func (p *program) programRunner(eventChannel chan Event, e Event) {
 			isRunning: false,
 		}
 	})
-	if p.pipeline == 0 {
+	// no batching
+	if p.batchMS == 0 {
 		go p.execProgram(e)
 		return
 	}
 
+	// batching starts here
 	p.pendingEvents.mux.Lock()
 	p.pendingEvents.events = append(p.pendingEvents.events, e)
 	p.pendingEvents.mux.Unlock()
@@ -322,9 +326,9 @@ func (p *program) programRunner(eventChannel chan Event, e Event) {
 		p.process.Kill()
 	}
 	// run later
-	dur, err := time.ParseDuration(fmt.Sprint(p.pipeline, "ms"))
+	dur, err := time.ParseDuration(fmt.Sprint(p.batchMS, "ms"))
 	if err != nil {
-		log.Panic(err)
+		panic(err)
 	}
 	time.AfterFunc(dur, func() {
 		eventChannel <- e
@@ -333,6 +337,7 @@ func (p *program) programRunner(eventChannel chan Event, e Event) {
 
 // exec the program and pass the event info as arguments
 func (p *program) execProgram(events ...Event) bool {
+	logVerbose("Executing program")
 	args := []string{p.base}
 	for _, e := range events {
 		args = append(append(args, e.Path), e.Operation)
@@ -341,16 +346,22 @@ func (p *program) execProgram(events ...Event) bool {
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		logError(err)
+		return false
 	}
 	if err := cmd.Start(); err != nil {
 		logError(err)
+		return false
 	}
 	p.process = cmd.Process
 	output, err := ioutil.ReadAll(stdout)
 	if err != nil {
 		logError(err)
+		return false
 	}
-	logVerbose("Output from command:\n" + string(output))
+	_, err = os.Stdout.Write(output)
+	if err != nil {
+		logError(err)
+	}
 	if err := cmd.Wait(); err != nil {
 		log.Println(err)
 		return false
@@ -358,7 +369,7 @@ func (p *program) execProgram(events ...Event) bool {
 	return true
 }
 
-// runs forever to try execProgram only if the pipeline threshold has passed, otherwise wait for the next event
+// runs forever to try execProgram only if the batch threshold has passed, otherwise wait for the next event
 func (p *program) execLoop() {
 	for {
 		<-p.eventChannel // wait for event
@@ -369,7 +380,7 @@ func (p *program) execLoop() {
 		e := events[len(events)-1]
 		past := time.Now().UnixNano()/1000000 - e.Time
 		// check if enough time has passed
-		if past >= int64(p.pipeline) {
+		if past >= int64(p.batchMS) {
 			if p.execProgram(events...) {
 				// reset list if successful
 				p.pendingEvents.mux.Lock()
