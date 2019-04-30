@@ -1,6 +1,6 @@
 package main
 
-// TODO disable kill, discard, docs, shorter flags
+// TODO docs, shorter flags, warn if have unused flags, remove duplicates
 
 import (
 	"bufio"
@@ -40,6 +40,8 @@ type program struct {
 	batchMS          int
 	base             string
 	silent           bool
+	queue            bool
+	discard          bool
 }
 
 type eventList struct {
@@ -91,6 +93,16 @@ func main() {
 			Destination: &prog.batchMS,
 		},
 		cli.BoolFlag{
+			Name:        "queue",
+			Usage:       "keep the executing program alive instead of killing it when a new event comes. Only applies to batching.",
+			Destination: &prog.queue,
+		},
+		cli.BoolFlag{
+			Name:        "discard",
+			Usage:       "discard events that have been passed to the program even if the program exited unsuccessfully",
+			Destination: &prog.discard,
+		},
+		cli.BoolFlag{
 			Name:        "silent",
 			Usage:       "don't print program output",
 			Destination: &prog.silent,
@@ -111,6 +123,7 @@ func main() {
 			if prog.clientAddress[0] == ':' {
 				prog.clientAddress = "localhost" + prog.clientAddress
 			}
+			logVerbose("Sending events to client at " + prog.clientAddress)
 		}
 		// enable pipelining
 		if prog.programCmd != "" && prog.batchMS > 0 {
@@ -123,7 +136,7 @@ func main() {
 		}
 		if verbose {
 			for _, p := range watchList {
-				logVerbose("Wathing: " + p)
+				logVerbose("Watching: " + p)
 			}
 		}
 
@@ -180,12 +193,14 @@ func findPaths(base string, pattern string, recursive bool, exclude string) []st
 	}
 	allPaths := make([]string, 0)
 	for _, p := range paths {
-		exlucded, err := regexp.MatchString(exclude, p)
-		if err != nil {
-			panic(err)
-		}
-		if exlucded {
-			continue
+		if exclude != "" {
+			exlucded, err := regexp.MatchString(exclude, p)
+			if err != nil {
+				panic(err)
+			}
+			if exlucded {
+				continue
+			}
 		}
 		allPaths = append(allPaths, p)
 		// if recursive and is dir, go deeper
@@ -329,7 +344,8 @@ func (p *program) programRunner(eventChannel chan Event, e Event) {
 	p.pendingEvents.events = append(p.pendingEvents.events, e)
 	p.pendingEvents.mux.Unlock()
 	// kill. If program is already done, there will be no effect
-	if p.process != nil {
+	if !p.queue && p.process != nil {
+		logVerbose("Killing program")
 		p.process.Kill()
 	}
 	// run later
@@ -381,23 +397,35 @@ func (p *program) execProgram(events ...Event) bool {
 // runs forever to try execProgram only if the batch threshold has passed, otherwise wait for the next event
 func (p *program) execLoop() {
 	for {
-		<-p.eventChannel // wait for event
+		<-p.eventChannel           // wait for event
+		p.pendingEvents.mux.Lock() // !!! make sure all exit points have unlock
 		events := p.pendingEvents.events
 		if len(events) == 0 {
+			p.pendingEvents.mux.Unlock()
 			continue
 		}
 		e := events[len(events)-1]
 		past := time.Now().UnixNano()/1000000 - e.Time
 		// check if enough time has passed
 		if past >= int64(p.batchMS) {
-			if p.execProgram(events...) {
-				// reset list if successful
-				p.pendingEvents.mux.Lock()
+			if p.discard {
 				p.pendingEvents.events = make([]Event, 0)
+			}
+			p.pendingEvents.mux.Unlock()
+			if p.execProgram(events...) {
+				// clear list if successful
+				p.pendingEvents.mux.Lock()
+				if p.queue {
+					p.pendingEvents.events = p.pendingEvents.events[len(events):] // only take the ones we processed
+				} else {
+					p.pendingEvents.events = make([]Event, 0)
+				}
 				p.pendingEvents.mux.Unlock()
 			} else {
 				// failed, or killed
 			}
+		} else {
+			p.pendingEvents.mux.Unlock()
 		}
 	}
 }
