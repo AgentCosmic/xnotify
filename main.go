@@ -1,5 +1,7 @@
 package main
 
+// TODO args checking, better logging, kill, discard, docs, verbose, enable prog output
+
 import (
 	"bufio"
 	"bytes"
@@ -27,14 +29,27 @@ type Event struct {
 	Time      int64  `json:"time"`
 }
 
-var watchList []string
-var base string
-var clientAddress string
-var programCmd string
-var pipeline int
+type program struct {
+	eventChannel     chan Event
+	pendingEvents    eventList
+	process          *os.Process
+	initProgamRunner sync.Once
+	clientAddress    string
+	programCmd       string
+	pipeline         int
+	base             string
+}
+
+type eventList struct {
+	events    []Event
+	isRunning bool
+	mux       sync.Mutex
+}
 
 func main() {
-	watchList = make([]string, 0)
+	prog := program{
+		eventChannel: make(chan Event),
+	}
 	app := cli.NewApp()
 	app.Name = "xnotify"
 	app.Version = "0.1.0"
@@ -44,7 +59,7 @@ func main() {
 			Name:        "base",
 			Value:       "./",
 			Usage:       "base path for the client",
-			Destination: &base,
+			Destination: &prog.base,
 		},
 		cli.StringFlag{
 			Name:  "listen",
@@ -53,59 +68,69 @@ func main() {
 		cli.StringFlag{
 			Name:        "client",
 			Usage:       "send file changes to the address e.g. localhost:8001",
-			Destination: &clientAddress,
-		},
-		cli.StringFlag{
-			Name:  "copy",
-			Usage: "copy the new file from base directory to the given directory",
+			Destination: &prog.clientAddress,
 		},
 		cli.StringFlag{
 			Name:        "program",
 			Usage:       "execute the program when a file changes",
-			Destination: &programCmd,
+			Destination: &prog.programCmd,
 		},
 		cli.IntFlag{
 			Name:        "pipeline",
 			Usage:       "send the events together if they occur within the time span. Only valid for program runner.",
-			Destination: &pipeline,
+			Destination: &prog.pipeline,
 		},
 		cli.BoolFlag{
 			Name:  "recursive",
 			Usage: "search directories recursively",
 		},
+		cli.BoolFlag{
+			Name:        "verbose",
+			Usage:       "print logs",
+			Destination: &verbose,
+		},
 	}
 	app.Action = func(c *cli.Context) error {
 		var err error
-		prod := producer{
-			eventChannel: make(chan Event),
-		}
-		base, err = filepath.Abs(base)
+		prog.base, err = filepath.Abs(prog.base)
 		if err != nil {
 			log.Fatal(err)
 		}
-		if clientAddress != "" {
-			if clientAddress[0] == ':' {
-				clientAddress = "localhost" + clientAddress
+		if prog.clientAddress != "" {
+			if prog.clientAddress[0] == ':' {
+				prog.clientAddress = "localhost" + prog.clientAddress
 			}
 		}
-		if pipeline != 0 {
-			go execLoop(prod.eventChannel)
+		// enable pipelining
+		if prog.programCmd != "" && prog.pipeline != 0 {
+			go prog.execLoop()
 		}
+		// find files from stdin and args
+		watchList := pathsFromStdin()
 		for _, arg := range c.Args() {
-			addToWatchlist(base, arg, c.Bool("recursive"))
+			watchList = append(watchList, findPaths(prog.base, arg, c.Bool("recursive"))...)
 		}
-		readStdin(base)
+
+		// fail if nothing to watch
+		serverAddr := c.String("listen")
+		if serverAddr == "" && len(watchList) == 0 {
+			log.Fatal("No files to watch")
+		}
+
+		var wait chan bool
+		// watch files at paths
 		if len(watchList) > 0 {
-			prod.watch(watchList)
+			prog.startWatching(prog.base, watchList, wait)
 		}
-		// this has to come last
-		if c.String("listen") != "" {
-			addr := c.String("listen")
+		// watch files form http
+		if serverAddr != "" {
+			addr := serverAddr
 			if addr[0] == ':' {
 				addr = "localhost" + addr
 			}
-			prod.startServer(addr)
+			prog.startServer(addr, wait)
 		}
+		_ = <-wait
 
 		return nil
 	}
@@ -130,7 +155,8 @@ func opToString(op fsnotify.Op) string {
 	panic(errors.New("No such op"))
 }
 
-func readStdin(base string) {
+func pathsFromStdin() []string {
+	paths := make([]string, 0)
 	fi, err := os.Stdin.Stat()
 	if err != nil {
 		panic(err)
@@ -138,40 +164,43 @@ func readStdin(base string) {
 	if fi.Size() > 0 {
 		scanner := bufio.NewScanner(os.Stdin)
 		for scanner.Scan() {
-			watchList = append(watchList, scanner.Text())
+			paths = append(paths, scanner.Text())
 		}
 		if err := scanner.Err(); err != nil {
-			log.Println(err)
+			logVerbose(err)
 		}
-	} else {
-		// fmt.Println("stdin is empty")
 	}
+	return paths
 }
 
-func addToWatchlist(base string, pattern string, recursive bool) {
+func findPaths(base string, pattern string, recursive bool) []string {
 	paths, err := filepath.Glob(path.Join(base, pattern))
 	if err != nil {
 		panic(err)
 	}
+	allPaths := paths
 	for _, p := range paths {
-		watchList = append(watchList, p)
+		allPaths = append(allPaths, p)
+		// if recursive and is dir, go deeper
 		if recursive {
 			fileInfo, err := os.Stat(p)
 			if err != nil {
 				panic(err)
 			}
 			if fileInfo.IsDir() {
-				addToWatchlist(p, "*", true)
+				allPaths = append(allPaths, findPaths(p, "*", true)...)
 			}
 		}
 	}
+	return allPaths
 }
 
-type producer struct {
-	eventChannel chan Event
-}
+//
+// ----- Watchers -----
+//
 
-func (p *producer) startServer(address string) {
+// start server that watch for files changes from other watchers
+func (p *program) startServer(address string, done chan bool) {
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		decoder := json.NewDecoder(r.Body)
 		var e Event
@@ -181,18 +210,18 @@ func (p *producer) startServer(address string) {
 		}
 		p.fileChanged(e)
 	})
-	log.Print("Listening on http://" + address)
-	http.ListenAndServe(address, nil)
+	logVerbose("Listening on http://" + address)
+	go http.ListenAndServe(address, nil)
 }
 
-func (p *producer) watch(paths []string) {
+// start watching files at the given paths
+func (p *program) startWatching(base string, paths []string, done chan bool) {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer watcher.Close()
+	// defer watcher.Close()
 
-	done := make(chan bool)
 	go func() {
 		for {
 			select {
@@ -215,7 +244,7 @@ func (p *producer) watch(paths []string) {
 				if !ok {
 					return
 				}
-				log.Println("error:", err)
+				logVerbose(err)
 			}
 		}
 	}()
@@ -226,39 +255,42 @@ func (p *producer) watch(paths []string) {
 			log.Fatal(err)
 		}
 	}
-	<-done
 }
 
 //
 // ----- Runners -----
 //
 
-func (p *producer) fileChanged(e Event) {
-	go printRunner(e)
-	if clientAddress != "" {
-		go httpRunner(e)
+// triggered when a file changes
+func (p *program) fileChanged(e Event) {
+	// fmt.Printf("%+v\n", e)
+	go p.printRunner(e)
+	if p.clientAddress != "" {
+		go p.httpRunner(e)
 	}
-	if programCmd != "" {
-		go programRunner(p.eventChannel, e)
+	if p.programCmd != "" {
+		go p.programRunner(p.eventChannel, e)
 	}
 }
 
-func printRunner(e Event) {
+// runner that prints to stdout
+func (p *program) printRunner(e Event) {
 	fmt.Println(e.Operation + " " + e.Path)
 }
 
-func httpRunner(e Event) {
+// runner that sends to a another client via http
+func (p *program) httpRunner(e Event) {
 	b, err := json.Marshal(&e)
 	if err != nil {
 		panic(err)
 	}
-	url := "http://" + clientAddress
+	url := "http://" + p.clientAddress
 	req, err := http.NewRequest("POST", url, bytes.NewBuffer(b))
 	req.Header.Set("Content-Type", "application/json")
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Println(err)
+		logVerbose(err)
 	}
 	if resp.Body != nil {
 		resp.Body.Close()
@@ -266,40 +298,31 @@ func httpRunner(e Event) {
 }
 
 //
-// ----- Batch program -----
+// ----- Batch program runner -----
 //
 
-type eventList struct {
-	events    []Event
-	isRunning bool
-	mux       sync.Mutex
-}
-
-var process *os.Process
-var initProgamRunner sync.Once
-var pendingEvents eventList
-
-func programRunner(eventChannel chan Event, e Event) {
-	initProgamRunner.Do(func() {
-		pendingEvents = eventList{
+// runner that executes an external program
+func (p *program) programRunner(eventChannel chan Event, e Event) {
+	p.initProgamRunner.Do(func() {
+		p.pendingEvents = eventList{
 			events:    make([]Event, 0),
 			isRunning: false,
 		}
 	})
-	if pipeline == 0 {
-		go execProgram(e)
+	if p.pipeline == 0 {
+		go p.execProgram(e)
 		return
 	}
 
-	pendingEvents.mux.Lock()
-	pendingEvents.events = append(pendingEvents.events, e)
-	pendingEvents.mux.Unlock()
-	// kill
-	if process != nil {
-		process.Kill()
+	p.pendingEvents.mux.Lock()
+	p.pendingEvents.events = append(p.pendingEvents.events, e)
+	p.pendingEvents.mux.Unlock()
+	// kill. If program is already done, there will be no effect
+	if p.process != nil {
+		p.process.Kill()
 	}
 	// run later
-	dur, err := time.ParseDuration(fmt.Sprint(pipeline, "ms"))
+	dur, err := time.ParseDuration(fmt.Sprint(p.pipeline, "ms"))
 	if err != nil {
 		log.Panic(err)
 	}
@@ -308,26 +331,26 @@ func programRunner(eventChannel chan Event, e Event) {
 	})
 }
 
-func execProgram(events ...Event) bool {
-	println("execProgram")
-	args := []string{base}
+// exec the program and pass the event info as arguments
+func (p *program) execProgram(events ...Event) bool {
+	args := []string{p.base}
 	for _, e := range events {
 		args = append(append(args, e.Path), e.Operation)
 	}
-	cmd := exec.Command(programCmd, args...)
+	cmd := exec.Command(p.programCmd, args...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		log.Println(err)
+		logError(err)
 	}
 	if err := cmd.Start(); err != nil {
-		log.Println(err)
+		logError(err)
 	}
-	process = cmd.Process
+	p.process = cmd.Process
 	output, err := ioutil.ReadAll(stdout)
 	if err != nil {
-		log.Println(err)
+		logError(err)
 	}
-	log.Print("Output from command:\n" + string(output))
+	logVerbose("Output from command:\n" + string(output))
 	if err := cmd.Wait(); err != nil {
 		log.Println(err)
 		return false
@@ -335,24 +358,42 @@ func execProgram(events ...Event) bool {
 	return true
 }
 
-func execLoop(eventChannel chan Event) {
+// runs forever to try execProgram only if the pipeline threshold has passed, otherwise wait for the next event
+func (p *program) execLoop() {
 	for {
-		<-eventChannel
-		events := pendingEvents.events
+		<-p.eventChannel // wait for event
+		events := p.pendingEvents.events
 		if len(events) == 0 {
 			continue
 		}
 		e := events[len(events)-1]
 		past := time.Now().UnixNano()/1000000 - e.Time
-		if past >= int64(pipeline) {
-			if execProgram(events...) {
+		// check if enough time has passed
+		if past >= int64(p.pipeline) {
+			if p.execProgram(events...) {
 				// reset list if successful
-				pendingEvents.mux.Lock()
-				pendingEvents.events = make([]Event, 0)
-				pendingEvents.mux.Unlock()
+				p.pendingEvents.mux.Lock()
+				p.pendingEvents.events = make([]Event, 0)
+				p.pendingEvents.mux.Unlock()
 			} else {
-				println("exec failed")
+				// failed, or killed
 			}
 		}
 	}
+}
+
+//
+// ----- Helpers -----
+//
+
+var verbose = false
+
+func logVerbose(msg interface{}) {
+	if verbose {
+		log.Println(msg)
+	}
+}
+
+func logError(msg interface{}) {
+	log.Println(msg)
 }
