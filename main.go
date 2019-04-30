@@ -1,6 +1,6 @@
 package main
 
-// TODO docs, shorter flags, warn if have unused flags, remove duplicates
+// TODO docs, shorter flags, warn if have unused flags
 
 import (
 	"bufio"
@@ -48,6 +48,18 @@ type eventList struct {
 	events    []Event
 	isRunning bool
 	mux       sync.Mutex
+}
+
+func (el *eventList) add(newEvent Event) {
+	// find and replace new event
+	for i, e := range el.events {
+		if e.Path == newEvent.Path {
+			el.events[i] = newEvent
+			return
+		}
+	}
+	// else add
+	el.events = append(el.events, newEvent)
 }
 
 func main() {
@@ -341,7 +353,7 @@ func (p *program) programRunner(eventChannel chan Event, e Event) {
 
 	// batching starts here
 	p.pendingEvents.mux.Lock()
-	p.pendingEvents.events = append(p.pendingEvents.events, e)
+	p.pendingEvents.add(e)
 	p.pendingEvents.mux.Unlock()
 	// kill. If program is already done, there will be no effect
 	if !p.queue && p.process != nil {
