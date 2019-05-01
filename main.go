@@ -109,7 +109,7 @@ func main() {
 		},
 		cli.IntFlag{
 			Name:        "batch",
-			Usage:       "Send the events together if they occur within `milliseconds`. The program will only execute given milliseconds after the last event was fired. Only valid with --program.",
+			Usage:       "Send the events together if they occur within given `milliseconds`. The program will only execute given milliseconds after the last event was fired. Only valid with --program.",
 			Destination: &prog.batchMS,
 		},
 		cli.BoolFlag{
@@ -200,7 +200,7 @@ func main() {
 		// fail if nothing to watch
 		serverAddr := c.String("listen")
 		if serverAddr == "" && len(watchList) == 0 {
-			log.Fatal("No files to watch")
+			log.Fatal("No files to watch. See --help on how to use this command.")
 		}
 
 		var wait chan bool
