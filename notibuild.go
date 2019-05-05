@@ -417,7 +417,7 @@ func (prog *program) programRunner(eventChannel chan Event, e Event) {
 	prog.pendingEvents.mux.Unlock()
 	// kill. If program is already done, there will be no effect
 	if !prog.queue && prog.process != nil {
-		logVerbose("Killing program")
+		// logVerbose("Killing program")
 		prog.process.Kill()
 	}
 	if prog.batchMS > 0 {
@@ -442,6 +442,7 @@ func (prog *program) execProgram(events ...Event) bool {
 		name = filepath.Base(prog.entry)[:len(prog.entry)-len(filepath.Ext(prog.entry))]
 	}
 	// build
+	start := time.Now()
 	cmd := exec.Command("go", "build", "-o", name, prog.entry)
 	cmd.Dir = prog.base
 	if err := cmd.Start(); err != nil {
@@ -453,6 +454,7 @@ func (prog *program) execProgram(events ...Event) bool {
 		log.Println(err)
 		return false
 	}
+	logVerbose(fmt.Sprintf("Built in %s", time.Since(start)))
 
 	// run
 	cmd = exec.Command("./" + name)
