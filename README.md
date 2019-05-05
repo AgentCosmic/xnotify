@@ -41,9 +41,10 @@ xnotify --client=":8090" .
 
 On the VM:
 ```
-xnotify --listen=":8090" --base="/opt/wwww/project" | build.sh
+xnotify --listen="0.0.0.0:8090" --base="/opt/wwww/project" | build.sh
 ```
-You only need to set `--base` if you're not running from the same folder.
+You only need to set `--base` if you're not running from the same folder. Rmember to use `0.0.0.0` becuase the traffic
+is coming from outside the system.
 
 ### Task Runner
 

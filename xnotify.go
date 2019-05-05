@@ -8,7 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -37,10 +37,10 @@ type program struct {
 	process          *os.Process
 	initProgamRunner sync.Once
 	clientAddress    string
-	programCmd       string
+	entry            string
 	batchMS          int
 	base             string
-	silent           bool
+	name             string
 	queue            bool
 	discard          bool
 }
@@ -103,9 +103,14 @@ func main() {
 			Destination: &prog.clientAddress,
 		},
 		cli.StringFlag{
-			Name:        "program",
-			Usage:       "Execute the `program` when a file changes i.e. program $base_path $file_path $operation",
-			Destination: &prog.programCmd,
+			Name:        "entry",
+			Usage:       "Path to the entry file. e.g. main.go or cmd/service/main.go",
+			Destination: &prog.entry,
+		},
+		cli.StringFlag{
+			Name:        "name",
+			Usage:       "Name of the compiled binary. Default to the name of the entry file.",
+			Destination: &prog.name,
 		},
 		cli.IntFlag{
 			Name:        "batch",
@@ -121,11 +126,6 @@ func main() {
 			Name:        "discard",
 			Usage:       "Discard events that have been passed to the program even if the program exited unsuccessfully or was killed before it finished. Otherwise the events will be passed to the program again. Only valid with --program.",
 			Destination: &prog.discard,
-		},
-		cli.BoolFlag{
-			Name:        "silent",
-			Usage:       "Don't print program output. Only valid with --program.",
-			Destination: &prog.silent,
 		},
 		cli.BoolFlag{
 			Name:        "verbose",
@@ -154,7 +154,7 @@ func main() {
 		if prog.base != defaultBase && c.String("listen") == "" {
 			noEffect("base")
 		}
-		if prog.programCmd == "" {
+		if prog.entry == "" {
 			if prog.batchMS != 0 {
 				noEffect("batch")
 			}
@@ -163,9 +163,6 @@ func main() {
 			}
 			if prog.discard {
 				noEffect("discard")
-			}
-			if prog.silent {
-				noEffect("silent")
 			}
 		}
 
@@ -182,7 +179,7 @@ func main() {
 		}
 
 		// enable pipelining
-		if prog.programCmd != "" && prog.batchMS > 0 || prog.queue {
+		if prog.entry != "" && prog.batchMS > 0 || prog.queue {
 			go prog.execLoop()
 		}
 
@@ -303,6 +300,8 @@ func (prog *program) startServer(address string, done chan bool) {
 		if err != nil {
 			logError(err)
 		}
+		// need to udpate time so because of the time difference
+		e.Time = time.Now().UnixNano() / 1000000
 		prog.fileChanged(e)
 	})
 	logVerbose("Listening on " + address)
@@ -331,7 +330,7 @@ func (prog *program) startWatching(base string, paths []string, done chan bool) 
 					} else {
 						prog.fileChanged(Event{
 							Operation: opToString(event.Op),
-							Path:      rp,
+							Path:      filepath.ToSlash(rp),
 							Time:      time.Now().UnixNano() / 1000000,
 						})
 					}
@@ -364,7 +363,7 @@ func (prog *program) fileChanged(e Event) {
 	if prog.clientAddress != "" {
 		go prog.httpRunner(e)
 	}
-	if prog.programCmd != "" {
+	if prog.entry != "" {
 		go prog.programRunner(prog.eventChannel, e)
 	}
 }
@@ -387,6 +386,7 @@ func (prog *program) httpRunner(e Event) {
 	resp, err := client.Do(req)
 	if err != nil {
 		logError(err)
+		return
 	}
 	if resp.Body != nil {
 		resp.Body.Close()
@@ -437,12 +437,32 @@ func (prog *program) programRunner(eventChannel chan Event, e Event) {
 // exec the program and pass the event info as arguments
 func (prog *program) execProgram(events ...Event) bool {
 	logVerbose("Executing program")
-	args := []string{prog.base}
-	for _, e := range events {
-		args = append(append(args, e.Path), e.Operation)
+	name := prog.name
+	if name == "" {
+		name = filepath.Base(prog.entry)[:len(prog.entry)-len(filepath.Ext(prog.entry))]
 	}
-	cmd := exec.Command(prog.programCmd, args...)
+	// build
+	cmd := exec.Command("go", "build", "-o", name, prog.entry)
+	cmd.Dir = prog.base
+	if err := cmd.Start(); err != nil {
+		logError(err)
+		return false
+	}
+	prog.process = cmd.Process
+	if err := cmd.Wait(); err != nil {
+		log.Println(err)
+		return false
+	}
+
+	// run
+	cmd = exec.Command("./" + name)
+	cmd.Dir = prog.base
 	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		logError(err)
+		return false
+	}
+	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		logError(err)
 		return false
@@ -453,16 +473,8 @@ func (prog *program) execProgram(events ...Event) bool {
 	}
 	prog.process = cmd.Process
 	// print program output to stderr
-	if !prog.silent {
-		output, err := ioutil.ReadAll(stdout)
-		if err != nil {
-			logError(err)
-			return false
-		}
-		if _, err = os.Stderr.Write(output); err != nil {
-			logError(err)
-		}
-	}
+	go io.Copy(os.Stderr, stdout)
+	go io.Copy(os.Stderr, stderr)
 	if err := cmd.Wait(); err != nil {
 		log.Println(err)
 		return false
@@ -541,4 +553,3 @@ func opToString(op fsnotify.Op) string {
 	}
 	panic(errors.New("No such op"))
 }
-
