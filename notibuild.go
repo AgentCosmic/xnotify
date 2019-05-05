@@ -38,11 +38,10 @@ type program struct {
 	initProgamRunner sync.Once
 	clientAddress    string
 	entry            string
+	test             string
 	batchMS          int
 	base             string
 	name             string
-	queue            bool
-	discard          bool
 }
 
 type eventList struct {
@@ -55,7 +54,7 @@ type eventList struct {
 func (el *eventList) add(newEvent Event) {
 	// find duplicate and delete it then append
 	for i, e := range el.events {
-		if e.Path == newEvent.Path {
+		if e.Path == newEvent.Path && e.Operation == newEvent.Operation {
 			a := el.events
 			copy(a[i:], a[i+1:])
 			a[len(a)-1] = newEvent
@@ -108,6 +107,11 @@ func main() {
 			Destination: &prog.entry,
 		},
 		cli.StringFlag{
+			Name:        "test",
+			Usage:       "Path to test e.g. ./... or ./tests/*",
+			Destination: &prog.test,
+		},
+		cli.StringFlag{
 			Name:        "name",
 			Usage:       "Name of the compiled binary. Default to the name of the entry file.",
 			Destination: &prog.name,
@@ -116,16 +120,6 @@ func main() {
 			Name:        "batch",
 			Usage:       "Send the events together if they occur within given `milliseconds`. The program will only execute given milliseconds after the last event was fired. Only valid with --program.",
 			Destination: &prog.batchMS,
-		},
-		cli.BoolFlag{
-			Name:        "queue",
-			Usage:       "Keep the executing program alive instead of killing it when a new event comes. Only valid with --program.",
-			Destination: &prog.queue,
-		},
-		cli.BoolFlag{
-			Name:        "discard",
-			Usage:       "Discard events that have been passed to the program even if the program exited unsuccessfully or was killed before it finished. Otherwise the events will be passed to the program again. Only valid with --program.",
-			Destination: &prog.discard,
 		},
 		cli.BoolFlag{
 			Name:        "verbose",
@@ -154,15 +148,9 @@ func main() {
 		if prog.base != defaultBase && c.String("listen") == "" {
 			noEffect("base")
 		}
-		if prog.entry == "" {
+		if prog.entry == "" && prog.test == "" {
 			if prog.batchMS != 0 {
 				noEffect("batch")
-			}
-			if prog.queue {
-				noEffect("queue")
-			}
-			if prog.discard {
-				noEffect("discard")
 			}
 		}
 
@@ -178,10 +166,8 @@ func main() {
 			logVerbose("Sending events to client at " + prog.clientAddress)
 		}
 
-		// enable pipelining
-		if prog.entry != "" && prog.batchMS > 0 || prog.queue {
-			go prog.execLoop()
-		}
+		// start exec loop
+		go prog.execLoop()
 
 		// find files from stdin and args
 		watchList := pathsFromStdin()
@@ -363,7 +349,7 @@ func (prog *program) fileChanged(e Event) {
 	if prog.clientAddress != "" {
 		go prog.httpRunner(e)
 	}
-	if prog.entry != "" {
+	if prog.entry != "" || prog.test != "" {
 		go prog.programRunner(prog.eventChannel, e)
 	}
 }
@@ -405,18 +391,13 @@ func (prog *program) programRunner(eventChannel chan Event, e Event) {
 			isRunning: false,
 		}
 	})
-	// no batching or queuingg
-	if prog.batchMS == 0 && !prog.queue {
-		go prog.execProgram(e)
-		return
-	}
 
 	// batching starts here
 	prog.pendingEvents.mux.Lock()
 	prog.pendingEvents.add(e)
 	prog.pendingEvents.mux.Unlock()
-	// kill. If program is already done, there will be no effect
-	if !prog.queue && prog.process != nil {
+	// kill for build and run only. If program is already done, there will be no effect
+	if prog.test == "" && prog.process != nil {
 		// logVerbose("Killing program")
 		prog.process.Kill()
 	}
@@ -435,7 +416,38 @@ func (prog *program) programRunner(eventChannel chan Event, e Event) {
 }
 
 // exec the program and pass the event info as arguments
-func (prog *program) execProgram(events ...Event) bool {
+func (prog *program) execProgram() bool {
+	if prog.entry != "" {
+		return prog.buildAndRun()
+	} else {
+		return prog.runTest()
+	}
+}
+
+// runs forever to try execProgram only if the batch threshold has passed, otherwise wait for the next event
+func (prog *program) execLoop() {
+	for {
+		<-prog.eventChannel           // wait for event
+		prog.pendingEvents.mux.Lock() // !!! make sure all exit points have unlock
+		events := prog.pendingEvents.events
+		if len(events) == 0 {
+			prog.pendingEvents.mux.Unlock()
+			continue
+		}
+		e := events[len(events)-1]
+		past := time.Now().UnixNano()/1000000 - e.Time
+		// check if enough time has passed
+		if past >= int64(prog.batchMS) {
+			prog.pendingEvents.events = make([]Event, 0) // clear list
+			prog.pendingEvents.mux.Unlock()
+			prog.execProgram()
+		} else {
+			prog.pendingEvents.mux.Unlock()
+		}
+	}
+}
+
+func (prog *program) buildAndRun() bool {
 	logVerbose("Executing program")
 	name := prog.name
 	if name == "" {
@@ -484,40 +496,38 @@ func (prog *program) execProgram(events ...Event) bool {
 	return true
 }
 
-// runs forever to try execProgram only if the batch threshold has passed, otherwise wait for the next event
-func (prog *program) execLoop() {
-	for {
-		<-prog.eventChannel           // wait for event
-		prog.pendingEvents.mux.Lock() // !!! make sure all exit points have unlock
-		events := prog.pendingEvents.events
-		if len(events) == 0 {
-			prog.pendingEvents.mux.Unlock()
-			continue
-		}
-		e := events[len(events)-1]
-		past := time.Now().UnixNano()/1000000 - e.Time
-		// check if enough time has passed
-		if past >= int64(prog.batchMS) {
-			if prog.discard {
-				prog.pendingEvents.events = make([]Event, 0)
-			}
-			prog.pendingEvents.mux.Unlock()
-			if prog.execProgram(events...) {
-				// clear list if successful
-				prog.pendingEvents.mux.Lock()
-				if prog.queue {
-					prog.pendingEvents.events = prog.pendingEvents.events[len(events):] // only take the ones we processed
-				} else {
-					prog.pendingEvents.events = make([]Event, 0)
-				}
-				prog.pendingEvents.mux.Unlock()
-			} else {
-				// failed, or killed
-			}
-		} else {
-			prog.pendingEvents.mux.Unlock()
-		}
+func (prog *program) runTest() bool {
+	logVerbose("Executing test")
+	var cmd *exec.Cmd
+	if prog.name == "" {
+		cmd = exec.Command("go", "test", prog.test)
+	} else {
+		cmd = exec.Command("go", "test", "-run", prog.name, prog.test)
 	}
+	cmd.Dir = prog.base
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		logError(err)
+		return false
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		logError(err)
+		return false
+	}
+	if err := cmd.Start(); err != nil {
+		logError(err)
+		return false
+	}
+	prog.process = cmd.Process
+	// print program output to stderr
+	go io.Copy(os.Stderr, stdout)
+	go io.Copy(os.Stderr, stderr)
+	if err := cmd.Wait(); err != nil {
+		log.Println(err)
+		return false
+	}
+	return true
 }
 
 //
