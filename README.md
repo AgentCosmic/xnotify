@@ -1,76 +1,83 @@
 # xnotify
-Cross platform file notification with built-in client/server and task management. Could replace some automatic build
-tools.
+Cross platform file notification with built-in task execution and a client/server feature to overcome virtual folders
+without relying polling.
 
 ## Features
-- Works on virtual folders/shared folders like those in VirtualBox and VMWare
-- Works on Windows, Linux, Mac OS
+- Works on virtual folders/shared folders like those in VirtualBox, VMWare and Docker
+- Works on Windows, Linux, Mac OS without polling
 - Single binary, no dependency
-- Flexible task running feature
+- Advanced task running feature to run build commands
 - HTTP client/server can be integrated into other apps/libraries
 
 ## Tutorial
 
+```
+USAGE:
+   xnotify [options] [-- <command> [args...]...]
+
+GLOBAL OPTIONS:
+   --include value, -i value  Include path to watch recursively.
+   --exclude value, -e value  Exclude files from the search using Regular Expression. This only applies to files that were passed as arguments.
+   --shallow                  Disable recursive file globbing. If the path is a directory, the contents will not be included.
+   --listen value             Listen on address for file changes e.g. localhost:8080 or just :8080. See --client on how to send file changes.
+   --base value               Use this base path instead of the working directory. This will affect where --include finds the files. If using --listen, it will replace the original base path that was used at the sender. (default: "./")
+   --client value             Send file changes to the address e.g. localhost:8080 or just :8080. See --listen on how to receive events.
+   --batch milliseconds       Send the events together if they occur within given milliseconds. The program will only execute given milliseconds after the last event was fired. Only valid with -- arguments (default: 0)
+   --verbose                  Print verbose logs.
+   --help, -h                 Print this help.
+   --version, -v              print the version
+```
+
 ### Basic Use
 
 Watch all files under `some_dir` and `another_dir/*.js` recursively and exclude `.git` folder. Send all events to
-`build.sh`.
+`build.sh` using xargs.
 ```
-xnotify --exclude="^\.git$" some_dir another_dir/*.js | build.sh
+./xnotify --exclude "^\.git$" --include some_dir --include another_dir/*.js | xargs -L 1 ./build.sh
+# or a shorter form
+./xnotify -e "^\.git$" -i some_dir -i another_dir/*.js | xargs -L 1 ./build.sh
 ```
 
 Disable recursive file matching. Only watch everything under current directory only.
 ```
-xnotify --shallow *
+./xnotify --shallow -i *
 ```
 
 Advanced file matching using external program.
 ```
-find *.css | xnotify | build.sh
+find *.css | ./xnotify | xargs -L 1 ./build.sh
 ```
 
 ### Client/server
 
-To use file notification on a virtual file system such as shared folder on VirtualBox, you need to run the app on the
+To use file notification on a virtual file system such as VirtualBox shared folder, you need to run the app on the
 host machine and VM. Both must point to the same port. Ensure the firewall is not blocking.
 
-On the host machine:
+Watch all files in the current directory on the host machine and send events to port 8090:
 ```
-xnotify --client=":8090" .
+./xnotify --client ":8090" -i .
 ```
 
 On the VM:
 ```
-xnotify --listen="0.0.0.0:8090" --base="/opt/wwww/project" | build.sh
+./xnotify --listen "0.0.0.0:8090" --base "/opt/wwww/project" | xargs -L 1 ./build.sh
 ```
-You only need to set `--base` if you're not running from the same folder. Rmember to use `0.0.0.0` becuase the traffic
-is coming from outside the system.
+You need to set `--base` if the working directory path is different on the host and VM. Remember to use `0.0.0.0`
+because the traffic is coming from outside the system.
 
 ### Task Runner
 
-Run `build.sh` for every file change. Kills and runs the program again if a new event comes before the program
-finishes. If the program is terminated before it finishes, the events will be saved and sent with the next run.
+Run multiple commands when a file changes. Kills and runs the commands again if a new event comes before the commands
+finish. Use `--batch 100` to run the command only 100ms after the last event happened. This will batch multiple
+events together and execute the command only once instead of restarting it for every single event. Commands will run in
+order as if the `&&` operator is used. Be careful not to run commands that spawn child processes as the child processes
+_might not_ terminate with the parent processes.
 ```
-xnotify --program="build.sh" .
+./xnotify -i . -e "\.git$" --batch 100 -- my_lint arg1 arg2 -- ./compile.sh --flag value -- ./run.sh
 ```
-
-Arguments are passed in the following format:
+This will run the commands in the same manner as:
 ```
-$base_path $rel_path1 $operation1 [$rel_path2 $operation2 $rel_path3 $operation3...]
-```
-
-To prevent events from restarting the program use `--queue`. Add `--batch="100"` so multiple events will trigger only
-once after 100ms of no new events.
-```
-xnotify --queue --batch="100" --program="build.sh" .
-
-```
-
-For long running processes such as a server, use `--discard` if you do not want to keep events when the program is
-restarted.
-```
-xnotify --discard --batch="100" --program="start-server.sh" .
-
+my_lint arg1 arg2 && ./compile.sh --flag value && ./run.sh
 ```
 
 ## Related Project
