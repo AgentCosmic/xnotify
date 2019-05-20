@@ -1,13 +1,13 @@
 # xnotify
 Cross platform file notification with built-in task execution and a client/server feature to overcome virtual folders
-without relying polling.
+without relying on polling.
 
 ## Features
-- Works on virtual folders/shared folders like those in VirtualBox, VMWare and Docker
-- Works on Windows, Linux, Mac OS without polling
-- Single binary, no dependency
-- Advanced task running feature to run build commands
-- HTTP client/server can be integrated into other apps/libraries
+- Works on virtual folders/shared folders like those in VirtualBox, VMWare and Docker.
+- Works on Windows, Linux, Mac OS without polling.
+- Single binary, no dependency.
+- Advanced task running feature to run build commands.
+- HTTP client/server can be integrated into other apps/libraries.
 
 ## Tutorial
 
