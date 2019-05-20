@@ -61,7 +61,7 @@ func main() {
 	app.Flags = []cli.Flag{
 		cli.StringSliceFlag{
 			Name:  "include, i",
-			Usage: "Include path to watch recursively. Defaults to current folder.",
+			Usage: "Include path to watch recursively.",
 		},
 		cli.StringSliceFlag{
 			Name:  "exclude, e",
@@ -139,7 +139,7 @@ func (prog *program) action(c *cli.Context) (err error) {
 	if prog.base != prog.defaultBase && c.String("listen") == "" {
 		noEffect("base")
 	}
-	if prog.batchMS > 0 && len(prog.tasks) > 0 {
+	if prog.batchMS > 0 && len(prog.tasks) == 0 {
 		noEffect("batch")
 	}
 
@@ -160,11 +160,7 @@ func (prog *program) action(c *cli.Context) (err error) {
 
 	// find files from stdin and --include
 	watchList := pathsFromStdin()
-	includes := c.StringSlice("include")
-	if len(includes) == 0 {
-		includes = []string{"."}
-	}
-	for _, arg := range includes {
+	for _, arg := range c.StringSlice("include") {
 		watchList = append(watchList, prog.findPaths(prog.base, arg, !c.Bool("shallow"), c.StringSlice("exclude"))...)
 	}
 	if verbose {
@@ -340,7 +336,7 @@ func (prog *program) fileChanged(e Event) {
 
 // runner that prints to stdout
 func (prog *program) printRunner(e Event) {
-	fmt.Println(e.Operation + " " + e.Path)
+	fmt.Printf("%s %s\n", e.Operation, e.Path)
 }
 
 // runner that sends to a another client via http

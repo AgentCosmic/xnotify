@@ -1,3 +1,3 @@
 $env:GOOS = 'linux'
-go build notibuild.go
+go build xnotify.go
 $env:GOOS = 'windows'
