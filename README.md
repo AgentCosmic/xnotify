@@ -15,6 +15,9 @@ without relying on polling.
 USAGE:
    xnotify [options] [-- <command> [args...]...]
 
+VERSION:
+   0.1.1
+
 GLOBAL OPTIONS:
    --include value, -i value  Include path to watch recursively.
    --exclude value, -e value  Exclude files from the search using Regular Expression. This only applies to files that were passed as arguments.
@@ -22,7 +25,8 @@ GLOBAL OPTIONS:
    --listen value             Listen on address for file changes e.g. localhost:8080 or just :8080. See --client on how to send file changes.
    --base value               Use this base path instead of the working directory. This will affect where --include finds the files. If using --listen, it will replace the original base path that was used at the sender. (default: "./")
    --client value             Send file changes to the address e.g. localhost:8080 or just :8080. See --listen on how to receive events.
-   --batch milliseconds       Send the events together if they occur within given milliseconds. The program will only execute given milliseconds after the last event was fired. Only valid with -- arguments (default: 0)
+   --batch milliseconds       Send the events together if they occur within given milliseconds. The program will only execute given milliseconds after the last event was fired. Only valid with -- argument. (default: 0)
+   --trigger                  Run the given command immediately even if there is no file change. Only valid with -- argument.
    --verbose                  Print verbose logs.
    --help, -h                 Print this help.
    --version, -v              print the version
@@ -79,6 +83,11 @@ This will run the commands in the same manner as:
 ```
 my_lint arg1 arg2 && ./compile.sh --flag value && ./run.sh
 ```
+You can also set the `--trigger` option if you want your command to run immediately before any file changes:
+```
+./xnotify -i . --trigger -- run_server.sh 8080
+```
+
 
 ## Similar Tools
 - inotify
