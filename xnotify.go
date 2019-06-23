@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"os/exec"
@@ -40,6 +41,7 @@ type program struct {
 	batchSize     int32
 	base          string
 	defaultBase   string
+	trigger       bool
 }
 
 func main() {
@@ -88,8 +90,13 @@ func main() {
 		},
 		cli.IntFlag{
 			Name:        "batch",
-			Usage:       "Send the events together if they occur within given `milliseconds`. The program will only execute given milliseconds after the last event was fired. Only valid with -- arguments",
+			Usage:       "Send the events together if they occur within given `milliseconds`. The program will only execute given milliseconds after the last event was fired. Only valid with -- argument.",
 			Destination: &prog.batchMS,
+		},
+		cli.BoolFlag{
+			Name:        "trigger",
+			Usage:       "Run the given command immediately even if there is no file change. Only valid with -- argument.",
+			Destination: &prog.trigger,
 		},
 		cli.BoolFlag{
 			Name:        "verbose",
@@ -142,6 +149,9 @@ func (prog *program) action(c *cli.Context) (err error) {
 	if prog.batchMS > 0 && len(prog.tasks) == 0 {
 		noEffect("batch")
 	}
+	if prog.trigger && len(prog.tasks) == 0 {
+		noEffect("trigger")
+	}
 
 	// convert base to absolute path
 	prog.base, err = filepath.Abs(prog.base)
@@ -154,9 +164,6 @@ func (prog *program) action(c *cli.Context) (err error) {
 		prog.clientAddress = fullURL(prog.clientAddress)
 		logVerbose("Sending events to client at " + prog.clientAddress)
 	}
-
-	// start exec loop
-	go prog.execLoop()
 
 	// find files from stdin and --include
 	watchList := pathsFromStdin()
@@ -174,6 +181,12 @@ func (prog *program) action(c *cli.Context) (err error) {
 	if serverAddr == "" && len(watchList) == 0 {
 		logError("No files to watch. See --help on how to use this command.")
 		return
+	}
+
+	// start exec loop
+	go prog.execLoop()
+	if prog.trigger && len(prog.tasks) > 0 {
+		prog.eventChannel <- Event{}
 	}
 
 	var wait chan bool
@@ -365,26 +378,23 @@ func (prog *program) httpRunner(e Event) {
 
 // runner that executes an external program
 func (prog *program) programRunner(eventChannel chan Event, e Event) {
-	if prog.batchMS > 0 {
-		// run later
-		dur, err := time.ParseDuration(fmt.Sprint(prog.batchMS, "ms"))
-		if err != nil {
-			panic(err)
-		}
-		atomic.AddInt32(&prog.batchSize, 1)
-		time.AfterFunc(dur, func() {
-			if atomic.AddInt32(&prog.batchSize, -1) == 0 {
-				// if program is already done, there will be no effect
-				if prog.process != nil {
-					logVerbose("Killing program")
-					prog.process.Kill()
-				}
-				eventChannel <- e
-			}
-		})
-	} else {
-		eventChannel <- e
+	// run later
+	ms := int(math.Max(1, float64(prog.batchMS))) // require at least 1 ms for us to capture prog.process to kill
+	dur, err := time.ParseDuration(fmt.Sprint(ms, "ms"))
+	if err != nil {
+		panic(err)
 	}
+	atomic.AddInt32(&prog.batchSize, 1)
+	time.AfterFunc(dur, func() {
+		if atomic.AddInt32(&prog.batchSize, -1) == 0 {
+			// if program is already done, there will be no effect
+			if prog.process != nil {
+				logVerbose("Killing program")
+				prog.process.Kill()
+			}
+			eventChannel <- e
+		}
+	})
 }
 
 // runs forever to try execTasks only if the batch threshold has passed, otherwise wait for the next event
@@ -392,11 +402,6 @@ func (prog *program) execLoop() {
 	for {
 		<-prog.eventChannel // wait for event
 		prog.execTasks()
-		// check if enough time has passed
-		// past := time.Now().UnixNano()/1000000 - e.Time
-		// if past >= int64(prog.batchMS) {
-		// }
-		// else just wait for the next event because it should only be called after batchMS has passed
 	}
 }
 
