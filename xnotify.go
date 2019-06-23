@@ -53,7 +53,7 @@ func main() {
 	}
 	app := cli.NewApp()
 	app.Name = "xnotify"
-	app.Version = "0.1.0"
+	app.Version = "0.1.1"
 	app.Usage = "Watch files for changes." +
 		"\n   File changes will be printed to stdout in the format <operation_name> <file_path>." +
 		"\n   stdin accepts a list of files to watch." +
