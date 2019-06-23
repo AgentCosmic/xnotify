@@ -80,5 +80,11 @@ This will run the commands in the same manner as:
 my_lint arg1 arg2 && ./compile.sh --flag value && ./run.sh
 ```
 
+## Similar Tools
+- inotify
+- fswatch
+- nodemon
+- entr
+
 ## Related Project
 Thanks to https://github.com/fsnotify/fsnotify for the cross platform notification library.
