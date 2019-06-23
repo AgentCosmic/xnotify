@@ -4,7 +4,7 @@ without relying on polling.
 
 ## Features
 - Works on virtual folders/shared folders like those in VirtualBox, VMWare and Docker.
-- Works on Windows, Linux, Mac OS without polling.
+- Works on Windows, Linux, OSX without polling.
 - Single binary, no dependency.
 - Advanced task running feature to run build commands.
 - HTTP client/server can be integrated into other apps/libraries.
@@ -16,7 +16,7 @@ USAGE:
    xnotify [options] [-- <command> [args...]...]
 
 VERSION:
-   0.1.1
+   0.2.0
 
 GLOBAL OPTIONS:
    --include value, -i value  Include path to watch recursively.
@@ -88,6 +88,13 @@ You can also set the `--trigger` option if you want your command to run immediat
 ./xnotify -i . --trigger -- run_server.sh 8080
 ```
 
+## Real World Examples
+
+[How to Get File Notification Working on Docker, VirtualBox, VMWare or Vagrant](https://daltontan.com/file-notification-docker-virtualbox-vmware-vagrant/27)
+
+[Go: Automatically Run Tests or Reload Web Server on File Changes](https://daltontan.com/automatically-run-tests-reload-web-server-on-file-changes/26)
+
+[How to Compile Go Code 40% Faster With RAM Disk](https://daltontan.com/how-to-compile-go-code-faster-with-ram-disk/24)
 
 ## Similar Tools
 - inotify
