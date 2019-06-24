@@ -9,6 +9,13 @@ without relying on polling.
 - Advanced task running feature to run build commands.
 - HTTP client/server can be integrated into other apps/libraries.
 
+## Installation
+
+Download the precompiled binaries at the [release page](https://github.com/AgentCosmic/xnotify/releases).
+
+Or if you have Go installed you can run:
+```go get github.com/AgentCosmic/xnotify```
+
 ## Tutorial
 
 ```
