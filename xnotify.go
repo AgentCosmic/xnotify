@@ -32,17 +32,18 @@ type Event struct {
 }
 
 type program struct {
-	eventChannel   chan Event
-	tasks          [][]string
-	process        *os.Process
-	processChannel chan bool
-	clientAddress  string
-	batchMS        int
-	batchSize      int32
-	base           string
-	defaultBase    string
-	trigger        bool
-	hasTasks       bool
+	eventChannel    chan Event
+	tasks           [][]string
+	process         *os.Process
+	processChannel  chan bool
+	clientAddress   string
+	batchMS         int
+	batchSize       int32
+	base            string
+	defaultBase     string
+	trigger         bool
+	hasTasks        bool
+	excludePatterns []string
 }
 
 func main() {
@@ -169,9 +170,10 @@ func (prog *program) action(c *cli.Context) (err error) {
 	}
 
 	// find files from stdin and --include
+	prog.excludePatterns = c.StringSlice("exclude")
 	watchList := pathsFromStdin()
 	for _, arg := range c.StringSlice("include") {
-		watchList = append(watchList, prog.findPaths(prog.base, arg, !c.Bool("shallow"), c.StringSlice("exclude"))...)
+		watchList = append(watchList, prog.findPaths(prog.base, arg, !c.Bool("shallow"))...)
 	}
 	if verbose {
 		for _, p := range watchList {
@@ -228,30 +230,15 @@ func pathsFromStdin() []string {
 	return paths
 }
 
-func (prog *program) findPaths(base string, pattern string, recursive bool, excludes []string) []string {
+func (prog *program) findPaths(base string, pattern string, recursive bool) []string {
 	paths, err := filepath.Glob(path.Join(base, pattern))
 	if err != nil {
 		panic(err)
 	}
 	allPaths := make([]string, 0)
 	for _, p := range paths {
-		// get relative to original base path
-		rel, err := filepath.Rel(prog.base, p)
-		if err != nil {
-			panic(err)
-		}
 		// check excludes
-		excluded := false
-		for _, ex := range excludes {
-			excluded, err = regexp.MatchString(ex, rel)
-			if err != nil {
-				panic(err)
-			}
-			if excluded {
-				break
-			}
-		}
-		if excluded {
+		if prog.isExcluded(p) {
 			continue
 		}
 		allPaths = append(allPaths, p)
@@ -262,11 +249,34 @@ func (prog *program) findPaths(base string, pattern string, recursive bool, excl
 				panic(err)
 			}
 			if fileInfo.IsDir() {
-				allPaths = append(allPaths, prog.findPaths(p, "*", true, excludes)...)
+				allPaths = append(allPaths, prog.findPaths(p, "*", true)...)
 			}
 		}
 	}
 	return allPaths
+}
+
+func (prog *program) isExcluded(path string) bool {
+	var rel string
+	if filepath.IsAbs(path) {
+		var err error
+		rel, err = filepath.Rel(prog.base, path)
+		if err != nil {
+			panic(err)
+		}
+	} else {
+		rel = path
+	}
+	for _, ex := range prog.excludePatterns {
+		excluded, err := regexp.MatchString(ex, rel)
+		if err != nil {
+			panic(err)
+		}
+		if excluded {
+			return true
+		}
+	}
+	return false
 }
 
 //
@@ -340,6 +350,10 @@ func (prog *program) startWatching(base string, paths []string, done chan bool) 
 
 // triggered when a file changes
 func (prog *program) fileChanged(e Event) {
+	if prog.isExcluded(e.Path) {
+		// a file change event might cause a dir change event even though it was excluded
+		return
+	}
 	// fmt.Printf("%+v\n", e)
 	go prog.printRunner(e)
 	if prog.clientAddress != "" {
