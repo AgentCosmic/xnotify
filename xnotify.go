@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"math"
 	"net/http"
 	"os"
 	"os/exec"
@@ -33,27 +32,30 @@ type Event struct {
 }
 
 type program struct {
-	eventChannel  chan Event
-	tasks         [][]string
-	process       *os.Process
-	clientAddress string
-	batchMS       int
-	batchSize     int32
-	base          string
-	defaultBase   string
-	trigger       bool
+	eventChannel   chan Event
+	tasks          [][]string
+	process        *os.Process
+	processChannel chan bool
+	clientAddress  string
+	batchMS        int
+	batchSize      int32
+	base           string
+	defaultBase    string
+	trigger        bool
+	hasTasks       bool
 }
 
 func main() {
 	log.SetPrefix("[xnotify] ")
 	log.SetFlags(0)
 	prog := program{
-		eventChannel: make(chan Event),
-		defaultBase:  "./",
+		eventChannel:   make(chan Event),
+		processChannel: make(chan bool, 3),
+		defaultBase:    "./",
 	}
 	app := cli.NewApp()
 	app.Name = "xnotify"
-	app.Version = "0.2.0"
+	app.Version = "0.2.1"
 	app.Usage = "Watch files for changes." +
 		"\n   File changes will be printed to stdout in the format <operation_name> <file_path>." +
 		"\n   stdin accepts a list of files to watch." +
@@ -141,15 +143,16 @@ func (prog *program) action(c *cli.Context) (err error) {
 			}
 		}
 	}
+	prog.hasTasks = len(prog.tasks) > 0
 
 	// check for unused flags
 	if prog.base != prog.defaultBase && c.String("listen") == "" {
 		noEffect("base")
 	}
-	if prog.batchMS > 0 && len(prog.tasks) == 0 {
+	if prog.batchMS != 0 && !prog.hasTasks {
 		noEffect("batch")
 	}
-	if prog.trigger && len(prog.tasks) == 0 {
+	if prog.trigger && !prog.hasTasks {
 		noEffect("trigger")
 	}
 
@@ -185,7 +188,7 @@ func (prog *program) action(c *cli.Context) (err error) {
 
 	// start exec loop
 	go prog.execLoop()
-	if prog.trigger && len(prog.tasks) > 0 {
+	if prog.hasTasks && prog.trigger {
 		prog.eventChannel <- Event{}
 	}
 
@@ -342,7 +345,7 @@ func (prog *program) fileChanged(e Event) {
 	if prog.clientAddress != "" {
 		go prog.httpRunner(e)
 	}
-	if len(prog.tasks) > 0 {
+	if prog.hasTasks {
 		go prog.programRunner(prog.eventChannel, e)
 	}
 }
@@ -379,21 +382,27 @@ func (prog *program) httpRunner(e Event) {
 // runner that executes an external program
 func (prog *program) programRunner(eventChannel chan Event, e Event) {
 	// run later
-	ms := int(math.Max(1, float64(prog.batchMS))) // require at least 1 ms for us to capture prog.process to kill
-	dur, err := time.ParseDuration(fmt.Sprint(ms, "ms"))
+	dur, err := time.ParseDuration(fmt.Sprint(prog.batchMS, "ms"))
 	if err != nil {
 		panic(err)
 	}
 	atomic.AddInt32(&prog.batchSize, 1)
 	time.AfterFunc(dur, func() {
-		if atomic.AddInt32(&prog.batchSize, -1) == 0 {
+		if atomic.LoadInt32(&prog.batchSize) == 1 {
 			// if program is already done, there will be no effect
 			if prog.process != nil {
 				logVerbose("Killing program")
 				prog.process.Kill()
 			}
+			for len(prog.processChannel) > 0 {
+				// need to clear anything from previous run
+				<-prog.processChannel
+			}
 			eventChannel <- e
+			// wait until the process is captured before proceeding so we can kill it later
+			<-prog.processChannel
 		}
+		atomic.AddInt32(&prog.batchSize, -1)
 	})
 }
 
@@ -441,6 +450,9 @@ func (prog *program) exec(name string, args ...string) bool {
 		return false
 	}
 	prog.process = cmd.Process
+	if len(prog.processChannel) == 0 { // don't overflow the buffer
+		prog.processChannel <- true
+	}
 	// print program output to stderr
 	go io.Copy(os.Stderr, stdout)
 	go io.Copy(os.Stderr, stderr)
