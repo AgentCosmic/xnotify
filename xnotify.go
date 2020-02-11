@@ -70,7 +70,7 @@ func main() {
 		},
 		cli.StringSliceFlag{
 			Name:  "exclude, e",
-			Usage: "Exclude files from the search using Regular Expression. This only applies to files that were passed as arguments.",
+			Usage: "Exclude changes from files that match the Regular Expression. This will also apply to events recieved in server mode.",
 		},
 		cli.BoolFlag{
 			Name:  "shallow",
