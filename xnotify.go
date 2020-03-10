@@ -292,7 +292,7 @@ func (prog *program) startServer(address string, done chan bool) {
 		if err != nil {
 			logError(err)
 		}
-		// need to udpate time so because of the time difference
+		// need to udpate time because of the time difference
 		e.Time = time.Now().UnixNano() / 1000000
 		prog.fileChanged(e)
 	})

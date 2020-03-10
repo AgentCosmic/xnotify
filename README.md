@@ -76,6 +76,11 @@ On the VM:
 You need to set `--base` if the working directory path is different on the host and VM. Remember to use `0.0.0.0`
 because the traffic is coming from outside the system.
 
+Since the client is triggered using HTTP, you can manually send a request to the client address to trigger a file
+change. Send a JSON request in the following format: `{"path": "path/to/file", "operation": "event name"}`. The `operation`
+field is optional as it's only used for logging. Some possible use cases would be triggering a task after a script has
+finished running, or setting up multiple clients for different events.
+
 ### Task Runner
 
 Run multiple commands when a file changes. Kills and runs the commands again if a new event comes before the commands
