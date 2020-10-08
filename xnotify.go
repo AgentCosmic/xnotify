@@ -1,7 +1,5 @@
 package main
 
-// TODO shorter flags
-
 import (
 	"bufio"
 	"bytes"
@@ -32,10 +30,10 @@ type Event struct {
 }
 
 type program struct {
-	eventChannel    chan Event
+	eventChannel    chan Event // track file change events
 	tasks           [][]string
 	process         *os.Process
-	processChannel  chan bool
+	processChannel  chan bool // track the process we are spawning
 	clientAddress   string
 	batchMS         int
 	batchSize       int32
@@ -193,16 +191,17 @@ func (prog *program) action(c *cli.Context) (err error) {
 	if prog.hasTasks && prog.trigger {
 		prog.eventChannel <- Event{}
 	}
-
-	var wait chan bool
 	// watch files at paths
 	if len(watchList) > 0 {
-		prog.startWatching(prog.base, watchList, wait)
+		prog.startWatching(prog.base, watchList)
 	}
 	// watch files form http
 	if serverAddr != "" {
-		prog.startServer(fullAddress(serverAddr), wait)
+		prog.startServer(fullAddress(serverAddr))
 	}
+
+	// so we don't exit
+	wait := make(chan bool)
 	_ = <-wait
 
 	return
@@ -284,7 +283,7 @@ func (prog *program) isExcluded(path string) bool {
 //
 
 // start server that watch for files changes from other watchers
-func (prog *program) startServer(address string, done chan bool) {
+func (prog *program) startServer(address string) {
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		decoder := json.NewDecoder(r.Body)
 		var e Event
@@ -297,11 +296,15 @@ func (prog *program) startServer(address string, done chan bool) {
 		prog.fileChanged(e)
 	})
 	logVerbose("Listening on " + address)
-	go http.ListenAndServe(address, nil)
+	go (func() {
+		if err := http.ListenAndServe(address, nil); err != nil {
+			panic(err)
+		}
+	})()
 }
 
 // start watching files at the given paths
-func (prog *program) startWatching(base string, paths []string, done chan bool) {
+func (prog *program) startWatching(base string, paths []string) {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		panic(err)
