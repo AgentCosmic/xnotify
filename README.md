@@ -23,7 +23,7 @@ USAGE:
    xnotify [options] [-- <command> [args...]...]
 
 VERSION:
-   0.2.1
+   0.2.4
 
 GLOBAL OPTIONS:
    --include value, -i value  Include path to watch recursively.
