@@ -15,11 +15,13 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
 	"gopkg.in/urfave/cli.v1"
+	"gopkg.in/alessio/shellescape.v1"
 )
 
 // Event for each file change
@@ -31,18 +33,26 @@ type Event struct {
 
 type program struct {
 	eventChannel    chan Event // track file change events
-	tasks           [][]string
-	process         *os.Process
-	processChannel  chan bool // track the process we are spawning
 	clientAddress   string
 	batchMS         int
-	batchSize       int32
 	base            string
 	defaultBase     string
-	trigger         bool
-	hasTasks        bool
 	excludePatterns []string
+	// used for print runner
+	terminator  string // used to terminate each batch
+	mu          sync.Mutex
+	timer       *time.Timer // used for debouncing
+	batchEvents []Event     // collect events for next batch
+	// used for task runner
+	trigger        bool        //  whether to trigger tasks immediately on startup
+	hasTasks       bool        // if there is any task to run
+	batchSize      int32       // keep track of the last event to trigger the runner
+	tasks          [][]string  // tasks to run
+	process        *os.Process // task process
+	processChannel chan bool   // track the process we are spawning
 }
+
+const NullChar = "\000"
 
 func main() {
 	log.SetPrefix("[xnotify] ")
@@ -54,11 +64,11 @@ func main() {
 	}
 	app := cli.NewApp()
 	app.Name = "xnotify"
-	app.Version = "0.2.4"
+	app.Version = "0.3.0"
 	app.Usage = "Watch files for changes." +
 		"\n   File changes will be printed to stdout in the format <operation_name> <file_path>." +
 		"\n   stdin accepts a list of files to watch." +
-		"\n   Use -- to execute 1 or more commands in sequence, stopping if any command exits unsuccessfully."
+		"\n   Use -- to execute 1 or more commands in sequence, stopping if any command exits unsuccessfully. It will kill the old tasks if a new event is triggered."
 	app.UsageText = "xnotify [options] [-- <command> [args...]...]"
 	app.HideHelp = true
 	app.Flags = []cli.Flag{
@@ -68,7 +78,7 @@ func main() {
 		},
 		cli.StringSliceFlag{
 			Name:  "exclude, e",
-			Usage: "Exclude changes from files that match the Regular Expression. This will also apply to events recieved in server mode.",
+			Usage: "Exclude changes from files that match the Regular Expression. This will also apply to events received in server mode.",
 		},
 		cli.BoolFlag{
 			Name:  "shallow",
@@ -81,7 +91,7 @@ func main() {
 		cli.StringFlag{
 			Name:        "base",
 			Value:       prog.defaultBase,
-			Usage:       "Use this base path instead of the working directory. This will affect where --include finds the files. If using --listen, it will replace the original base path that was used at the sender.",
+			Usage:       "Use this base path instead of the working directory. This changes the root directory used by --include. If using --listen, it will replace the original base path that was used at the sender.",
 			Destination: &prog.base,
 		},
 		cli.StringFlag{
@@ -91,12 +101,18 @@ func main() {
 		},
 		cli.IntFlag{
 			Name:        "batch",
-			Usage:       "Send the events together if they occur within given `milliseconds`. The program will only execute given milliseconds after the last event was fired. Only valid with -- argument.",
+			Usage:       "Delay emitting all events until it is idle for the given time in milliseconds (also known as debouncing). The --client argument does not support batching.",
 			Destination: &prog.batchMS,
+		},
+		cli.StringFlag{
+			Name:        "terminator",
+			Usage:       "Terminator used to terminate each batch when printing to stdout. Only active when --batch option is used.",
+			Destination: &prog.terminator,
+			Value:       NullChar,
 		},
 		cli.BoolFlag{
 			Name:        "trigger",
-			Usage:       "Run the given command immediately even if there is no file change. Only valid with -- argument.",
+			Usage:       "Run the given command immediately even if there is no file change. Only valid with the -- argument.",
 			Destination: &prog.trigger,
 		},
 		cli.BoolFlag{
@@ -148,8 +164,8 @@ func (prog *program) action(c *cli.Context) (err error) {
 	if prog.base != prog.defaultBase && c.String("listen") == "" {
 		noEffect("base")
 	}
-	if prog.batchMS != 0 && !prog.hasTasks {
-		noEffect("batch")
+	if prog.terminator != NullChar && prog.batchMS == 0 {
+		noEffect("terminator")
 	}
 	if prog.trigger && !prog.hasTasks {
 		noEffect("trigger")
@@ -367,11 +383,6 @@ func (prog *program) fileChanged(e Event) {
 	}
 }
 
-// runner that prints to stdout
-func (prog *program) printRunner(e Event) {
-	fmt.Printf("%s %s\n", e.Operation, e.Path)
-}
-
 // runner that sends to a another client via http
 func (prog *program) httpRunner(e Event) {
 	b, err := json.Marshal(&e)
@@ -392,6 +403,29 @@ func (prog *program) httpRunner(e Event) {
 	}
 }
 
+// runner that prints to stdout
+func (prog *program) printRunner(e Event) {
+	prog.mu.Lock()
+	defer prog.mu.Unlock()
+	dur, err := time.ParseDuration(fmt.Sprint(prog.batchMS, "ms"))
+	if err != nil {
+		panic(err)
+	}
+	if prog.timer != nil {
+		prog.timer.Stop()
+	}
+	prog.batchEvents = append(prog.batchEvents, e)
+	prog.timer = time.AfterFunc(dur, func() {
+		for _, e := range prog.batchEvents {
+			fmt.Printf("%s %s\n", e.Operation, shellescape.Quote(e.Path))
+		}
+		if dur > 0 {
+			fmt.Print(prog.terminator)
+		}
+		prog.batchEvents = make([]Event, 0)
+	})
+}
+
 //
 // ----- Batch program runner -----
 //
@@ -405,6 +439,7 @@ func (prog *program) programRunner(eventChannel chan Event, e Event) {
 	}
 	atomic.AddInt32(&prog.batchSize, 1)
 	time.AfterFunc(dur, func() {
+		// only need to execute once the last task is here, means the batchMS time has passed since last event
 		if atomic.LoadInt32(&prog.batchSize) == 1 {
 			// if program is already done, there will be no effect
 			if prog.process != nil {
@@ -415,6 +450,7 @@ func (prog *program) programRunner(eventChannel chan Event, e Event) {
 				// need to clear anything from previous run
 				<-prog.processChannel
 			}
+			// tell the loop there's new event
 			eventChannel <- e
 			// wait until the process is captured before proceeding so we can kill it later
 			<-prog.processChannel

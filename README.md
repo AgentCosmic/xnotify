@@ -11,7 +11,7 @@ without relying on polling.
 
 ## Installation
 
-Download the precompiled binaries at the [release page](https://github.com/AgentCosmic/xnotify/releases).
+Download the pre-compiled binaries at the [release page](https://github.com/AgentCosmic/xnotify/releases).
 
 Or if you have Go installed you can run:
 ```go get github.com/AgentCosmic/xnotify```
@@ -19,21 +19,28 @@ Or if you have Go installed you can run:
 ## Tutorial
 
 ```
+NAME:
+   xnotify - Watch files for changes.
+   File changes will be printed to stdout in the format <operation_name> <file_path>.
+   stdin accepts a list of files to watch.
+   Use -- to execute 1 or more commands in sequence, stopping if any command exits unsuccessfully. It will kill the old tasks if a new event is triggered.
+
 USAGE:
    xnotify [options] [-- <command> [args...]...]
 
 VERSION:
-   0.2.4
+   0.3.0
 
 GLOBAL OPTIONS:
    --include value, -i value  Include path to watch recursively.
-   --exclude value, -e value  Exclude files from the search using Regular Expression. This only applies to files that were passed as arguments.
+   --exclude value, -e value  Exclude changes from files that match the Regular Expression. This will also apply to events received in server mode.
    --shallow                  Disable recursive file globbing. If the path is a directory, the contents will not be included.
    --listen value             Listen on address for file changes e.g. localhost:8080 or just :8080. See --client on how to send file changes.
-   --base value               Use this base path instead of the working directory. This will affect where --include finds the files. If using --listen, it will replace the original base path that was used at the sender. (default: "./")
+   --base value               Use this base path instead of the working directory. This changes the root directory used by --include. If using --listen, it will replace the original base path that was used at the sender. (default: "./")
    --client value             Send file changes to the address e.g. localhost:8080 or just :8080. See --listen on how to receive events.
-   --batch milliseconds       Send the events together if they occur within given milliseconds. The program will only execute given milliseconds after the last event was fired. Only valid with -- argument. (default: 0)
-   --trigger                  Run the given command immediately even if there is no file change. Only valid with -- argument.
+   --batch value              Delay emitting all events until it is idle for the given time in milliseconds (also known as debouncing). The --client argument does not support batching. (default: 0)
+   --terminator value         Terminator used to terminate each batch when printing to stdout. Only active when --batch option is used. (default: "\x00")
+   --trigger                  Run the given command immediately even if there is no file change. Only valid with the -- argument.
    --verbose                  Print verbose logs.
    --help, -h                 Print this help.
    --version, -v              print the version
@@ -71,25 +78,24 @@ Watch all files in the current directory on the host machine and send events to 
 
 On the VM:
 ```
-./xnotify --listen "0.0.0.0:8090" --base "/opt/wwww/project" | xargs -L 1 ./build.sh
+./xnotify --listen "0.0.0.0:8090" --base "/home/john/project" | xargs -L 1 ./build.sh
 ```
 You need to set `--base` if the working directory path is different on the host and VM. Remember to use `0.0.0.0`
 because the traffic is coming from outside the system.
 
-Since the client is triggered using HTTP, you can manually send a request to the client address to trigger a file
-change. Send a JSON request in the following format: `{"path": "path/to/file", "operation": "event name"}`. The `operation`
+Since the client is triggered using HTTP, you can manually send a request to the client address to trigger an event.
+Send a JSON request in the following format: `{"path": "path/to/file", "operation": "event name"}`. The `operation`
 field is optional as it's only used for logging. Some possible use cases would be triggering a task after a script has
 finished running, or setting up multiple clients for different events.
 
 ### Task Runner
 
 Run multiple commands when a file changes. Kills and runs the commands again if a new event comes before the commands
-finish. Use `--batch 100` to run the command only 100ms after the last event happened. This will batch multiple
-events together and execute the command only once instead of restarting it for every single event. Commands will run in
-order as if the `&&` operator is used. Be careful not to run commands that spawn child processes as the child processes
-_might not_ terminate with the parent processes.
+finish. Commands will run in
+the same order as if the `&&` operator is used. Be careful not to run commands that spawn child processes as the child
+processes _might not_ terminate with the parent processes.
 ```
-./xnotify -i . -e "\.git$" --batch 100 -- my_lint arg1 arg2 -- ./compile.sh --flag value -- ./run.sh
+./xnotify -i . -e "\.git$" -- my_lint arg1 arg2 -- ./compile.sh --flag value -- ./run.sh
 ```
 This will run the commands in the same manner as:
 ```
@@ -99,6 +105,33 @@ You can also set the `--trigger` option if you want your command to run immediat
 ```
 ./xnotify -i . --trigger -- run_server.sh 8080
 ```
+
+### Batching
+
+Sometimes multiple file events are triggered within a very short timespan. This might cause too many processes to
+spawn. To solve this we can use the `--batch` argument. This will delay the events from emiting until a certain
+duration has passed since the last event &mdash; also known as debouncing. For example, by using `--batch 100`, the
+events will only be emitted once the last file change is 100ms old.
+
+Each batch will be terminated with a null character by default. You can change this using `--terminator`. Each event
+will still be terminated with new lines. Here are some examples with `xargs`.
+
+The `-0` or `--null` flags allow `xargs` to recognize each batch using the null character:
+
+```
+./xnotify -i . --batch 1000 | xargs -0 -L 1 ./build.sh
+```
+
+Using a different terminator such as `xxx`:
+```
+./xnotify -i . --batch 1000 --terminator xxx | xargs -d xxx -L 1 ./build.sh
+```
+
+Since the events are batched, the `$1` argument will now contain a list of events. You will have to parse this text to
+extract the path information if you need it.
+
+Batching works with the task runner too. It will only restart the tasks after the last event is emitted. The
+`--terminator` flag does not apply here.
 
 ## Real World Examples
 
