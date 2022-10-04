@@ -1,4 +1,4 @@
-package main
+package xnotify
 
 import (
 	"bufio"
@@ -20,8 +20,8 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
-	"gopkg.in/urfave/cli.v1"
 	"gopkg.in/alessio/shellescape.v1"
+	"gopkg.in/urfave/cli.v1"
 )
 
 // Event for each file change
@@ -31,107 +31,30 @@ type Event struct {
 	Time      int64  `json:"time"`
 }
 
-type program struct {
-	eventChannel    chan Event // track file change events
-	clientAddress   string
-	batchMS         int
-	base            string
-	defaultBase     string
+type Program struct {
+	EventChannel    chan Event // track file change events
+	ClientAddress   string
+	BatchMS         int
+	Base            string
+	DefaultBase     string
 	excludePatterns []string
 	// used for print runner
-	terminator  string // used to terminate each batch
+	Terminator  string // used to terminate each batch
 	mu          sync.Mutex
 	timer       *time.Timer // used for debouncing
 	batchEvents []Event     // collect events for next batch
 	// used for task runner
-	trigger        bool        //  whether to trigger tasks immediately on startup
+	Trigger        bool        //  whether to trigger tasks immediately on startup
 	hasTasks       bool        // if there is any task to run
 	batchSize      int32       // keep track of the last event to trigger the runner
 	tasks          [][]string  // tasks to run
 	process        *os.Process // task process
-	processChannel chan bool   // track the process we are spawning
+	ProcessChannel chan bool   // track the process we are spawning
 }
 
 const NullChar = "\000"
 
-func main() {
-	log.SetPrefix("[xnotify] ")
-	log.SetFlags(0)
-	prog := program{
-		eventChannel:   make(chan Event),
-		processChannel: make(chan bool, 3),
-		defaultBase:    "./",
-	}
-	app := cli.NewApp()
-	app.Name = "xnotify"
-	app.Version = "0.3.0"
-	app.Usage = "Watch files for changes." +
-		"\n   File changes will be printed to stdout in the format <operation_name> <file_path>." +
-		"\n   stdin accepts a list of files to watch." +
-		"\n   Use -- to execute 1 or more commands in sequence, stopping if any command exits unsuccessfully. It will kill the old tasks if a new event is triggered."
-	app.UsageText = "xnotify [options] [-- <command> [args...]...]"
-	app.HideHelp = true
-	app.Flags = []cli.Flag{
-		cli.StringSliceFlag{
-			Name:  "include, i",
-			Usage: "Include path to watch recursively.",
-		},
-		cli.StringSliceFlag{
-			Name:  "exclude, e",
-			Usage: "Exclude changes from files that match the Regular Expression. This will also apply to events received in server mode.",
-		},
-		cli.BoolFlag{
-			Name:  "shallow",
-			Usage: "Disable recursive file globbing. If the path is a directory, the contents will not be included.",
-		},
-		cli.StringFlag{
-			Name:  "listen",
-			Usage: "Listen on address for file changes e.g. localhost:8080 or just :8080. See --client on how to send file changes.",
-		},
-		cli.StringFlag{
-			Name:        "base",
-			Value:       prog.defaultBase,
-			Usage:       "Use this base path instead of the working directory. This changes the root directory used by --include. If using --listen, it will replace the original base path that was used at the sender.",
-			Destination: &prog.base,
-		},
-		cli.StringFlag{
-			Name:        "client",
-			Usage:       "Send file changes to the address e.g. localhost:8080 or just :8080. See --listen on how to receive events.",
-			Destination: &prog.clientAddress,
-		},
-		cli.IntFlag{
-			Name:        "batch",
-			Usage:       "Delay emitting all events until it is idle for the given time in milliseconds (also known as debouncing). The --client argument does not support batching.",
-			Destination: &prog.batchMS,
-		},
-		cli.StringFlag{
-			Name:        "terminator",
-			Usage:       "Terminator used to terminate each batch when printing to stdout. Only active when --batch option is used.",
-			Destination: &prog.terminator,
-			Value:       NullChar,
-		},
-		cli.BoolFlag{
-			Name:        "trigger",
-			Usage:       "Run the given command immediately even if there is no file change. Only valid with the -- argument.",
-			Destination: &prog.trigger,
-		},
-		cli.BoolFlag{
-			Name:        "verbose",
-			Usage:       "Print verbose logs.",
-			Destination: &verbose,
-		},
-		cli.BoolFlag{
-			Name:  "help, h",
-			Usage: "Print this help.",
-		},
-	}
-	app.Action = prog.action
-	if err := app.Run(os.Args); err != nil {
-		panic(err)
-	}
-}
-
-func (prog *program) action(c *cli.Context) (err error) {
+func (prog *Program) Action(c *cli.Context) (err error) {
 	if c.Bool("help") {
 		err = cli.ShowAppHelp(c)
 		if err != nil {
@@ -161,35 +84,35 @@ func (prog *program) action(c *cli.Context) (err error) {
 	prog.hasTasks = len(prog.tasks) > 0
 
 	// check for unused flags
-	if prog.base != prog.defaultBase && c.String("listen") == "" {
+	if prog.Base != prog.DefaultBase && c.String("listen") == "" {
 		noEffect("base")
 	}
-	if prog.terminator != NullChar && prog.batchMS == 0 {
+	if prog.Terminator != NullChar && prog.BatchMS == 0 {
 		noEffect("terminator")
 	}
-	if prog.trigger && !prog.hasTasks {
+	if prog.Trigger && !prog.hasTasks {
 		noEffect("trigger")
 	}
 
 	// convert base to absolute path
-	prog.base, err = filepath.Abs(prog.base)
+	prog.Base, err = filepath.Abs(prog.Base)
 	if err != nil {
 		return
 	}
 
 	// convert clientAddress to full url
-	if prog.clientAddress != "" {
-		prog.clientAddress = fullURL(prog.clientAddress)
-		logVerbose("Sending events to client at " + prog.clientAddress)
+	if prog.ClientAddress != "" {
+		prog.ClientAddress = fullURL(prog.ClientAddress)
+		logVerbose("Sending events to client at " + prog.ClientAddress)
 	}
 
 	// find files from stdin and --include
 	prog.excludePatterns = c.StringSlice("exclude")
 	watchList := pathsFromStdin()
 	for _, arg := range c.StringSlice("include") {
-		watchList = append(watchList, prog.findPaths(prog.base, arg, !c.Bool("shallow"))...)
+		watchList = append(watchList, prog.findPaths(prog.Base, arg, !c.Bool("shallow"))...)
 	}
-	if verbose {
+	if Verbose {
 		for _, p := range watchList {
 			logVerbose("Watching: " + p)
 		}
@@ -204,12 +127,12 @@ func (prog *program) action(c *cli.Context) (err error) {
 
 	// start exec loop
 	go prog.execLoop()
-	if prog.hasTasks && prog.trigger {
-		prog.eventChannel <- Event{}
+	if prog.hasTasks && prog.Trigger {
+		prog.EventChannel <- Event{}
 	}
 	// watch files at paths
 	if len(watchList) > 0 {
-		prog.startWatching(prog.base, watchList)
+		prog.startWatching(prog.Base, watchList)
 	}
 	// watch files form http
 	if serverAddr != "" {
@@ -245,7 +168,7 @@ func pathsFromStdin() []string {
 	return paths
 }
 
-func (prog *program) findPaths(base string, pattern string, recursive bool) []string {
+func (prog *Program) findPaths(base string, pattern string, recursive bool) []string {
 	paths, err := filepath.Glob(path.Join(base, pattern))
 	if err != nil {
 		panic(err)
@@ -271,11 +194,11 @@ func (prog *program) findPaths(base string, pattern string, recursive bool) []st
 	return allPaths
 }
 
-func (prog *program) isExcluded(path string) bool {
+func (prog *Program) isExcluded(path string) bool {
 	var rel string
 	if filepath.IsAbs(path) {
 		var err error
-		rel, err = filepath.Rel(prog.base, path)
+		rel, err = filepath.Rel(prog.Base, path)
 		if err != nil {
 			panic(err)
 		}
@@ -299,7 +222,7 @@ func (prog *program) isExcluded(path string) bool {
 //
 
 // start server that watch for files changes from other watchers
-func (prog *program) startServer(address string) {
+func (prog *Program) startServer(address string) {
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		decoder := json.NewDecoder(r.Body)
 		var e Event
@@ -320,7 +243,7 @@ func (prog *program) startServer(address string) {
 }
 
 // start watching files at the given paths
-func (prog *program) startWatching(base string, paths []string) {
+func (prog *Program) startWatching(base string, paths []string) {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		panic(err)
@@ -368,29 +291,29 @@ func (prog *program) startWatching(base string, paths []string) {
 //
 
 // triggered when a file changes
-func (prog *program) fileChanged(e Event) {
+func (prog *Program) fileChanged(e Event) {
 	if prog.isExcluded(e.Path) {
 		// a file change event might cause a dir change event even though it was excluded
 		return
 	}
 	// fmt.Printf("%+v\n", e)
 	go prog.printRunner(e)
-	if prog.clientAddress != "" {
+	if prog.ClientAddress != "" {
 		go prog.httpRunner(e)
 	}
 	if prog.hasTasks {
-		go prog.programRunner(prog.eventChannel, e)
+		go prog.programRunner(prog.EventChannel, e)
 	}
 }
 
 // runner that sends to a another client via http
-func (prog *program) httpRunner(e Event) {
+func (prog *Program) httpRunner(e Event) {
 	b, err := json.Marshal(&e)
 	if err != nil {
 		logError(err)
 		return
 	}
-	req, err := http.NewRequest("POST", prog.clientAddress, bytes.NewBuffer(b))
+	req, err := http.NewRequest("POST", prog.ClientAddress, bytes.NewBuffer(b))
 	req.Header.Set("Content-Type", "application/json")
 	client := &http.Client{}
 	resp, err := client.Do(req)
@@ -404,10 +327,10 @@ func (prog *program) httpRunner(e Event) {
 }
 
 // runner that prints to stdout
-func (prog *program) printRunner(e Event) {
+func (prog *Program) printRunner(e Event) {
 	prog.mu.Lock()
 	defer prog.mu.Unlock()
-	dur, err := time.ParseDuration(fmt.Sprint(prog.batchMS, "ms"))
+	dur, err := time.ParseDuration(fmt.Sprint(prog.BatchMS, "ms"))
 	if err != nil {
 		panic(err)
 	}
@@ -420,7 +343,7 @@ func (prog *program) printRunner(e Event) {
 			fmt.Printf("%s %s\n", e.Operation, shellescape.Quote(e.Path))
 		}
 		if dur > 0 {
-			fmt.Print(prog.terminator)
+			fmt.Print(prog.Terminator)
 		}
 		prog.batchEvents = make([]Event, 0)
 	})
@@ -431,9 +354,9 @@ func (prog *program) printRunner(e Event) {
 //
 
 // runner that executes an external program
-func (prog *program) programRunner(eventChannel chan Event, e Event) {
+func (prog *Program) programRunner(eventChannel chan Event, e Event) {
 	// run later
-	dur, err := time.ParseDuration(fmt.Sprint(prog.batchMS, "ms"))
+	dur, err := time.ParseDuration(fmt.Sprint(prog.BatchMS, "ms"))
 	if err != nil {
 		panic(err)
 	}
@@ -446,28 +369,28 @@ func (prog *program) programRunner(eventChannel chan Event, e Event) {
 				logVerbose("Killing program")
 				prog.process.Kill()
 			}
-			for len(prog.processChannel) > 0 {
+			for len(prog.ProcessChannel) > 0 {
 				// need to clear anything from previous run
-				<-prog.processChannel
+				<-prog.ProcessChannel
 			}
 			// tell the loop there's new event
 			eventChannel <- e
 			// wait until the process is captured before proceeding so we can kill it later
-			<-prog.processChannel
+			<-prog.ProcessChannel
 		}
 		atomic.AddInt32(&prog.batchSize, -1)
 	})
 }
 
 // runs forever to try execTasks only if the batch threshold has passed, otherwise wait for the next event
-func (prog *program) execLoop() {
+func (prog *Program) execLoop() {
 	for {
-		<-prog.eventChannel // wait for event
+		<-prog.EventChannel // wait for event
 		prog.execTasks()
 	}
 }
 
-func (prog *program) execTasks() bool {
+func (prog *Program) execTasks() bool {
 	logVerbose("Executing program")
 	start := time.Now()
 	var ok bool
@@ -485,9 +408,9 @@ func (prog *program) execTasks() bool {
 	return ok
 }
 
-func (prog *program) exec(name string, args ...string) bool {
+func (prog *Program) exec(name string, args ...string) bool {
 	cmd := exec.Command(name, args...)
-	cmd.Dir = prog.base
+	cmd.Dir = prog.Base
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		logError(err)
@@ -503,8 +426,8 @@ func (prog *program) exec(name string, args ...string) bool {
 		return false
 	}
 	prog.process = cmd.Process
-	if len(prog.processChannel) == 0 { // don't overflow the buffer
-		prog.processChannel <- true
+	if len(prog.ProcessChannel) == 0 { // don't overflow the buffer
+		prog.ProcessChannel <- true
 	}
 	// print program output to stderr
 	go io.Copy(os.Stderr, stdout)
@@ -520,10 +443,10 @@ func (prog *program) exec(name string, args ...string) bool {
 // ----- Helpers -----
 //
 
-var verbose = false
+var Verbose = false
 
 func logVerbose(msg interface{}) {
-	if verbose {
+	if Verbose {
 		log.Printf("\033[1;34m%s\033[0m", msg)
 	}
 }

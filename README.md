@@ -6,7 +6,7 @@ without relying on polling.
 ## Features
 
 - Works on virtual folders/shared folders like those in VirtualBox, VMWare and Docker.
-- Works on Windows, Linux, OSX without polling.
+- Works on Windows, Linux, and macOS without polling.
 - Single binary, no dependency.
 - Advanced task running feature to run build commands.
 - HTTP client/server can be integrated into other apps/libraries.
@@ -16,7 +16,16 @@ without relying on polling.
 Download the pre-compiled binaries at the [release page](https://github.com/AgentCosmic/xnotify/releases).
 
 Or if you have Go installed you can run:
-```go get github.com/AgentCosmic/xnotify```
+
+```shell
+go get github.com/AgentCosmic/xnotify
+```
+
+## Testing
+
+```shell
+make tests
+```
 
 ## Tutorial
 

@@ -21,4 +21,4 @@
 # Go workspace file
 go.work
 
-/releases
+releases/
