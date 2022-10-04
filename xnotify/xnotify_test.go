@@ -6,6 +6,15 @@ import (
 	"github.com/fsnotify/fsnotify"
 )
 
+func TestIsExecFlag(t *testing.T) {
+	if isExecFlag("-") == true {
+		t.Error("Expected false, got true")
+	}
+	if isExecFlag("--") == false {
+		t.Error("Expected true, got false")
+	}
+}
+
 func TestOpToString(t *testing.T) {
 	type opToStringTest struct {
 		opCode   fsnotify.Op
