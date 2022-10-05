@@ -12,8 +12,6 @@ func main() {
 	log.SetPrefix("[xnotify] ")
 	log.SetFlags(0)
 	prog := xnotify.Program{
-		EventChannel:   make(chan xnotify.Event),
-		ProcessChannel: make(chan bool, 3),
 		DefaultBase:    "./",
 	}
 	app := cli.NewApp()

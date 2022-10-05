@@ -32,11 +32,11 @@ type Event struct {
 }
 
 type Program struct {
-	EventChannel    chan Event // track file change events
 	ClientAddress   string
 	BatchMS         int
 	Base            string
 	DefaultBase     string
+	eventChannel    chan Event // track file change events
 	excludePatterns []string
 	// used for print runner
 	Terminator  string // used to terminate each batch
@@ -49,7 +49,7 @@ type Program struct {
 	batchSize      int32       // keep track of the last event to trigger the runner
 	tasks          [][]string  // tasks to run
 	process        *os.Process // task process
-	ProcessChannel chan bool   // track the process we are spawning
+	processChannel chan bool   // track the process we are spawning
 }
 
 const NullChar = "\000"
@@ -62,6 +62,10 @@ func (prog *Program) Action(c *cli.Context) (err error) {
 		}
 		return
 	}
+
+	// init channels
+	prog.eventChannel = make(chan Event)
+	prog.processChannel = make(chan bool, 3)
 
 	// create tasks
 	prog.tasks = make([][]string, 0)
@@ -128,7 +132,7 @@ func (prog *Program) Action(c *cli.Context) (err error) {
 	// start exec loop
 	go prog.execLoop()
 	if prog.hasTasks && prog.Trigger {
-		prog.EventChannel <- Event{}
+		prog.eventChannel <- Event{}
 	}
 	// watch files at paths
 	if len(watchList) > 0 {
@@ -302,7 +306,7 @@ func (prog *Program) fileChanged(e Event) {
 		go prog.httpRunner(e)
 	}
 	if prog.hasTasks {
-		go prog.programRunner(prog.EventChannel, e)
+		go prog.programRunner(prog.eventChannel, e)
 	}
 }
 
@@ -369,14 +373,14 @@ func (prog *Program) programRunner(eventChannel chan Event, e Event) {
 				logVerbose("Killing program")
 				prog.process.Kill()
 			}
-			for len(prog.ProcessChannel) > 0 {
+			for len(prog.processChannel) > 0 {
 				// need to clear anything from previous run
-				<-prog.ProcessChannel
+				<-prog.processChannel
 			}
 			// tell the loop there's new event
 			eventChannel <- e
 			// wait until the process is captured before proceeding so we can kill it later
-			<-prog.ProcessChannel
+			<-prog.processChannel
 		}
 		atomic.AddInt32(&prog.batchSize, -1)
 	})
@@ -385,7 +389,7 @@ func (prog *Program) programRunner(eventChannel chan Event, e Event) {
 // runs forever to try execTasks only if the batch threshold has passed, otherwise wait for the next event
 func (prog *Program) execLoop() {
 	for {
-		<-prog.EventChannel // wait for event
+		<-prog.eventChannel // wait for event
 		prog.execTasks()
 	}
 }
@@ -426,8 +430,8 @@ func (prog *Program) exec(name string, args ...string) bool {
 		return false
 	}
 	prog.process = cmd.Process
-	if len(prog.ProcessChannel) == 0 { // don't overflow the buffer
-		prog.ProcessChannel <- true
+	if len(prog.processChannel) == 0 { // don't overflow the buffer
+		prog.processChannel <- true
 	}
 	// print program output to stderr
 	go io.Copy(os.Stderr, stdout)
