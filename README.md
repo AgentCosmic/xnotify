@@ -29,7 +29,7 @@ make tests
 
 ## Tutorial
 
-```shell
+```
 NAME:
    xnotify - Watch files for changes.
    File changes will be printed to stdout in the format <operation_name> <file_path>.
