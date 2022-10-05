@@ -1,10 +1,12 @@
 # xnotify
+
 Cross platform file notification with built-in task execution and a client/server feature to overcome virtual folders
 without relying on polling.
 
 ## Features
+
 - Works on virtual folders/shared folders like those in VirtualBox, VMWare and Docker.
-- Works on Windows, Linux, OSX without polling.
+- Works on Windows, Linux, and macOS without polling.
 - Single binary, no dependency.
 - Advanced task running feature to run build commands.
 - HTTP client/server can be integrated into other apps/libraries.
@@ -14,7 +16,16 @@ without relying on polling.
 Download the pre-compiled binaries at the [release page](https://github.com/AgentCosmic/xnotify/releases).
 
 Or if you have Go installed you can run:
-```go get github.com/AgentCosmic/xnotify```
+
+```shell
+go get github.com/AgentCosmic/xnotify
+```
+
+## Testing
+
+```shell
+make tests
+```
 
 ## Tutorial
 
@@ -50,19 +61,22 @@ GLOBAL OPTIONS:
 
 Watch all files under `some_dir` and `another_dir/*.js` recursively and exclude `.git` folder. Send all events to
 `build.sh` using xargs.
-```
+
+```shell
 ./xnotify --exclude "^\.git$" --include some_dir --include another_dir/*.js | xargs -L 1 ./build.sh
 # or a shorter form
 ./xnotify -e "^\.git$" -i some_dir -i another_dir/*.js | xargs -L 1 ./build.sh
 ```
 
 Disable recursive file matching. Only watch everything under current directory only.
-```
+
+```shell
 ./xnotify --shallow -i *
 ```
 
 Advanced file matching using external program.
-```
+
+```shell
 find *.css | ./xnotify | xargs -L 1 ./build.sh
 ```
 
@@ -72,14 +86,17 @@ To use file notification on a virtual file system such as VirtualBox shared fold
 host machine and VM. Both must point to the same port. Ensure the firewall is not blocking.
 
 Watch all files in the current directory on the host machine and send events to port 8090:
-```
+
+```shell
 ./xnotify --client ":8090" -i .
 ```
 
 On the VM:
-```
+
+```shell
 ./xnotify --listen "0.0.0.0:8090" --base "/home/john/project" | xargs -L 1 ./build.sh
 ```
+
 You need to set `--base` if the working directory path is different on the host and VM. Remember to use `0.0.0.0`
 because the traffic is coming from outside the system.
 
@@ -94,22 +111,27 @@ Run multiple commands when a file changes. Kills and runs the commands again if 
 finish. Commands will run in
 the same order as if the `&&` operator is used. Be careful not to run commands that spawn child processes as the child
 processes _might not_ terminate with the parent processes.
-```
+
+```shell
 ./xnotify -i . -e "\.git$" -- my_lint arg1 arg2 -- ./compile.sh --flag value -- ./run.sh
 ```
+
 This will run the commands in the same manner as:
-```
+
+```shell
 my_lint arg1 arg2 && ./compile.sh --flag value && ./run.sh
 ```
+
 You can also set the `--trigger` option if you want your command to run immediately before any file changes:
-```
+
+```shell
 ./xnotify -i . --trigger -- run_server.sh 8080
 ```
 
 ### Batching
 
 Sometimes multiple file events are triggered within a very short timespan. This might cause too many processes to
-spawn. To solve this we can use the `--batch` argument. This will delay the events from emiting until a certain
+spawn. To solve this we can use the `--batch` argument. This will delay the events from emitting until a certain
 duration has passed since the last event &mdash; also known as debouncing. For example, by using `--batch 100`, the
 events will only be emitted once the last file change is 100ms old.
 
@@ -118,12 +140,13 @@ will still be terminated with new lines. Here are some examples with `xargs`.
 
 The `-0` or `--null` flags allow `xargs` to recognize each batch using the null character:
 
-```
+```shell
 ./xnotify -i . --batch 1000 | xargs -0 -L 1 ./build.sh
 ```
 
 Using a different terminator such as `xxx`:
-```
+
+```shell
 ./xnotify -i . --batch 1000 --terminator xxx | xargs -d xxx -L 1 ./build.sh
 ```
 
@@ -142,10 +165,12 @@ Batching works with the task runner too. It will only restart the tasks after th
 [How to Compile Go Code 40% Faster With RAM Disk](https://daltontan.com/how-to-compile-go-code-faster-with-ram-disk/24)
 
 ## Similar Tools
+
 - inotify
 - fswatch
 - nodemon
 - entr
 
 ## Related Project
+
 Thanks to https://github.com/fsnotify/fsnotify for the cross platform notification library.
